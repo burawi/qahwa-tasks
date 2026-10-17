@@ -9,20 +9,24 @@ import {
   type Actor,
   type ArtifactReference,
   type CommentKind,
+  type CommitApproval,
   type HandoffInput,
   type Project,
   type ProjectLogo,
+  type PreviewReference,
   type RelatedTask,
   type RichTextDocument,
   type TaskComment,
   type TaskDetail,
   type TaskOutcome,
   type TaskOutput,
+  type TaskPreview,
   type TaskArtifact,
   type TaskStatus,
   type TaskSummary,
 } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
+import { ReviewedCommitService, type StoredCommitProposal } from "./reviewed-commit.js";
 
 interface ProjectRow {
   id: string; name: string; prefix: string; root_directory: string; archived_at: string | null;
@@ -46,6 +50,9 @@ interface CommentRow {
 interface OutputRow {
   id: string; task_id: string; summary: string; validation_json: string; commit_hash: string | null;
   limitations_json: string; session_id: string | null; run_id: string | null; artifacts_json: string;
+  preview_json: string | null;
+  commit_proposal_json: string | null; commit_approval_status: "pending" | "processing" | "committed" | null;
+  approved_commit_hash: string | null;
   source_comment_id: string | null; created_at: string;
 }
 
@@ -123,6 +130,8 @@ const ARTIFACT_MEDIA_TYPES: Record<string, { mediaType: string; kind: TaskArtifa
 };
 
 export class TaskService {
+  private readonly reviewedCommits = new ReviewedCommitService();
+
   constructor(private readonly database: AppDatabase) {}
 
   listProjects(includeArchived = false): Project[] {
@@ -459,19 +468,50 @@ export class TaskService {
     const validation = this.outputList(input.validation);
     const limitations = this.outputList(input.limitations);
     const artifacts = this.artifactList(input.artifacts);
+    const preview = this.previewReference(input.preview);
+    assertDomain(!(input.commit && input.commitProposal), "An output cannot contain both an existing commit and a commit proposal", "invalid_output");
+    const proposal = input.commitProposal ? this.reviewedCommits.prepare(task.rootDirectory, input.commitProposal) : null;
     const id = randomUUID();
     const createdAt = now();
     this.database.db.prepare(`
       INSERT INTO task_outputs
-      (id, task_id, summary, validation_json, commit_hash, limitations_json, session_id, run_id, artifacts_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, task_id, summary, validation_json, commit_hash, limitations_json, session_id, run_id, artifacts_json,
+       preview_json, commit_proposal_json, commit_approval_status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, task.id, summary, JSON.stringify(validation), input.commit?.trim() || null,
       JSON.stringify(limitations), input.sessionId?.trim() || null, input.runId?.trim() || null,
-      JSON.stringify(artifacts), createdAt,
+      JSON.stringify(artifacts), preview ? JSON.stringify(preview) : null,
+      proposal ? JSON.stringify(proposal) : null, proposal ? "pending" : null, createdAt,
     );
     this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "output.created", details: { outputId: id } });
     return this.outputById(id);
+  }
+
+  approveOutputCommit(taskId: string, outputId: string, actor: "user"): TaskDetail {
+    const task = this.getTask(taskId);
+    assertDomain(task.status === "in_review", "Only an in-review task output can be approved for commit", "commit_not_eligible", 409);
+    const row = this.outputRow(outputId);
+    assertDomain(row.task_id === task.id, "Output not found", "output_not_found", 404);
+    assertDomain(row.commit_proposal_json, "This output has no commit proposal", "commit_not_eligible", 409);
+    if (row.commit_approval_status === "committed") return task;
+    assertDomain(row.commit_approval_status === "pending", "Commit approval is already being processed", "commit_in_progress", 409);
+    this.validatePublishFollowup(task.projectId);
+    const claimed = this.database.db.prepare(`
+      UPDATE task_outputs SET commit_approval_status = 'processing'
+      WHERE id = ? AND commit_approval_status = 'pending'
+    `).run(row.id);
+    assertDomain(claimed.changes === 1, "Commit approval is already being processed", "commit_in_progress", 409);
+    let commit: string | null = null;
+    try {
+      const proposal = JSON.parse(row.commit_proposal_json) as StoredCommitProposal;
+      commit = this.reviewedCommits.commit(proposal);
+      this.recordApprovedCommit(task, row.id, proposal, commit, actor);
+      return this.getTask(task.id);
+    } catch (error) {
+      if (!commit) this.database.db.prepare("UPDATE task_outputs SET commit_approval_status = 'pending' WHERE id = ?").run(row.id);
+      throw error;
+    }
   }
 
   activityForTask(id: string, limit = 50): unknown[] {
@@ -637,8 +677,77 @@ export class TaskService {
       validation: JSON.parse(row.validation_json) as string[], commit: row.commit_hash,
       limitations: JSON.parse(row.limitations_json) as string[], sessionId: row.session_id, runId: row.run_id,
       artifacts: stored.map((artifact, index) => this.describeArtifact(row.task_id, row.id, index, artifact, rootDirectory)),
+      preview: row.preview_json ? JSON.parse(row.preview_json) as TaskPreview : null,
+      commitApproval: this.commitApproval(row),
       sourceCommentId: row.source_comment_id, createdAt: row.created_at,
     };
+  }
+
+  private outputRow(id: string): OutputRow {
+    const row = this.database.db.prepare("SELECT * FROM task_outputs WHERE id = ?").get(id) as OutputRow | undefined;
+    assertDomain(row, "Output not found", "output_not_found", 404);
+    return row;
+  }
+
+  private commitApproval(row: OutputRow): CommitApproval | null {
+    if (!row.commit_proposal_json) return null;
+    const stored = JSON.parse(row.commit_proposal_json) as StoredCommitProposal;
+    return {
+      message: stored.message, repositoryRoot: stored.repositoryRoot, baseRevision: stored.baseRevision,
+      files: stored.files, releaseNote: stored.releaseNote,
+      status: row.commit_approval_status === "committed" ? "committed" : "pending",
+      commitHash: row.approved_commit_hash,
+    };
+  }
+
+  private validatePublishFollowup(projectId: string): void {
+    const rows = this.database.db.prepare(`
+      SELECT id FROM tasks WHERE project_id = ? AND title = 'Publish/deploy changes' COLLATE NOCASE AND status != 'closed'
+    `).all(projectId) as Array<{ id: string }>;
+    assertDomain(rows.length <= 1, "Project has multiple active publish/deploy tasks", "publish_task_conflict", 409);
+  }
+
+  private recordApprovedCommit(
+    source: TaskDetail,
+    outputId: string,
+    proposal: StoredCommitProposal,
+    commit: string,
+    actor: Actor,
+  ): void {
+    const apply = this.database.db.transaction(() => {
+      this.database.db.prepare(`
+        UPDATE task_outputs SET commit_hash = ?, approved_commit_hash = ?, commit_approval_status = 'committed' WHERE id = ?
+      `).run(commit, commit, outputId);
+      const existing = this.database.db.prepare(`
+        SELECT id FROM tasks WHERE project_id = ? AND title = 'Publish/deploy changes' COLLATE NOCASE AND status != 'closed'
+      `).get(source.projectId) as { id: string } | undefined;
+      const entry = `${commit} — ${source.humanId}: ${proposal.releaseNote}`;
+      let followup: TaskDetail;
+      if (existing) {
+        followup = this.getTask(existing.id);
+        const description = structuredClone(followup.description);
+        description.content = [...(description.content ?? []), { type: "paragraph", content: [{ type: "text", text: entry }] }];
+        followup = this.updateTask(followup.id, { description, expectedVersion: followup.version }, "system");
+      } else {
+        followup = this.createTask({
+          projectId: source.projectId, title: "Publish/deploy changes", status: "todo",
+          sections: {
+            goal: "Publish or deploy the project's approved commits when separately authorized.",
+            details: [entry],
+            doneWhen: ["Each listed commit is pushed, published, or deployed only with explicit authorization."],
+          },
+        }, "system");
+      }
+      const [lowId, highId] = [source.id, followup.id].sort();
+      this.database.db.prepare(`
+        INSERT OR IGNORE INTO task_relationships (task_low_id, task_high_id, created_at, created_by) VALUES (?, ?, ?, ?)
+      `).run(lowId, highId, now(), actor);
+      this.activity({
+        taskId: source.id, projectId: source.projectId, actor, eventType: "output.commit_approved",
+        details: { outputId, commit, followupTaskId: followup.humanId },
+      });
+    });
+    apply();
   }
 
   artifactFile(taskId: string, outputId: string, index: number): { path: string; filename: string; mediaType: string; size: number } {
@@ -685,6 +794,33 @@ export class TaskService {
       }
     }
     return result;
+  }
+
+  private previewReference(value: PreviewReference | undefined): TaskPreview | null {
+    if (!value) return null;
+    let url: URL;
+    try { url = new URL(value.url.trim()); }
+    catch { throw new DomainError("Preview URL is invalid", "invalid_output"); }
+    assertDomain(["http:", "https:"].includes(url.protocol), "Preview URL must use HTTP or HTTPS", "invalid_output");
+    assertDomain(this.isTailscaleHost(url.hostname), "Preview URL must use an approved Tailscale address", "invalid_output");
+    const startCommand = value.startCommand.trim();
+    const processOwner = value.processOwner.trim();
+    assertDomain(startCommand.length > 0 && startCommand.length <= 2_000, "Preview start command is invalid", "invalid_output");
+    assertDomain(processOwner.length > 0 && processOwner.length <= 200, "Preview process owner is invalid", "invalid_output");
+    const checkedAt = value.checkedAt?.trim() || now();
+    assertDomain(!Number.isNaN(Date.parse(checkedAt)), "Preview checked time is invalid", "invalid_output");
+    return { url: url.toString(), startCommand, processOwner, availability: value.availability, checkedAt };
+  }
+
+  private isTailscaleHost(hostname: string): boolean {
+    const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (normalized.endsWith(".ts.net")) return true;
+    const parts = normalized.split(".").map(Number);
+    if (parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+      const [first = -1, second = -1] = parts;
+      return first === 100 && second >= 64 && second <= 127;
+    }
+    return normalized.startsWith("fd7a:115c:a1e0:");
   }
 
   private describeArtifact(

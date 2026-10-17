@@ -93,6 +93,10 @@ test("appends structured outputs chronologically with complete provenance", () =
     tasks.submitForReview(created.id, {
       sessionId: "session-1", runId: "run-1", summary: "First pass", validation: ["Unit tests"],
       commit: "abc123", limitations: ["No browser QA"], artifacts: ["dist/report.json"],
+      preview: {
+        url: "https://workstation.tailnet.ts.net:4173", startCommand: "npm run preview -- --host 0.0.0.0",
+        processOwner: "Codex session session-1", availability: "available", checkedAt: "2026-10-17T09:00:00.000Z",
+      },
     }, "codex");
     tasks.transition(created.id, { to: "in_progress" }, "codex");
     tasks.submitForReview(created.id, { sessionId: "session-2", summary: "Revision" }, "codex");
@@ -103,8 +107,27 @@ test("appends structured outputs chronologically with complete provenance", () =
     assert.deepEqual(outputs[0]?.limitations, ["No browser QA"]);
     assert.equal(outputs[0]?.artifacts[0]?.source, "dist/report.json");
     assert.equal(outputs[0]?.artifacts[0]?.availability, "missing");
+    assert.deepEqual(outputs[0]?.preview, {
+      url: "https://workstation.tailnet.ts.net:4173/", startCommand: "npm run preview -- --host 0.0.0.0",
+      processOwner: "Codex session session-1", availability: "available", checkedAt: "2026-10-17T09:00:00.000Z",
+    });
+    assert.equal(outputs[1]?.preview, null);
     assert.equal(outputs[1]?.summary, "Revision");
     assert.notEqual(outputs[0]?.id, outputs[1]?.id);
+  } finally { database.close(); }
+});
+
+test("rejects preview URLs outside the approved Tailscale network", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    const created = tasks.createTask({ projectId: project.id, title: "Unsafe preview", status: "todo" }, "codex");
+    tasks.transition(created.id, { to: "in_progress" }, "codex");
+    assert.throws(() => tasks.addOutput(created.id, {
+      summary: "Preview", preview: {
+        url: "http://127.0.0.1:4173", startCommand: "npm run dev:web", processOwner: "Codex session",
+        availability: "available",
+      },
+    }, "codex"), /approved Tailscale address/);
   } finally { database.close(); }
 });
 

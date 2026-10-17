@@ -34,6 +34,8 @@ const compactTask = (task: ReturnType<TaskService["getTask"]>) => ({
   outputs: task.outputs.map((output) => ({
     createdAt: output.createdAt, summary: output.summary, validation: output.validation, commit: output.commit,
     limitations: output.limitations, sessionId: output.sessionId, runId: output.runId, artifacts: output.artifacts,
+    preview: output.preview,
+    commitApproval: output.commitApproval,
   })),
   latestHandoff: task.latestHandoff ? { text: task.latestHandoff.plainText, metadata: task.latestHandoff.metadata } : null,
   relatedTasks: task.relatedTasks.map((related) => ({
@@ -86,6 +88,22 @@ const artifactReference = z.union([
     mediaType: z.string().optional(), size: z.number().int().nonnegative().optional(),
   }).refine((value) => Boolean(value.path) !== Boolean(value.url), "Provide exactly one path or URL"),
 ]);
+
+const previewReference = z.object({
+  url: z.string().url().describe("Exact HTTP(S) URL on the approved Tailscale network"),
+  startCommand: z.string().min(1).max(2_000),
+  processOwner: z.string().min(1).max(200),
+  availability: z.enum(["available", "stopped", "failed", "unreachable"]),
+  checkedAt: z.string().datetime().optional(),
+});
+
+const commitProposal = z.object({
+  message: z.string().min(1).max(500),
+  repositoryRoot: z.string().min(1),
+  baseRevision: z.string().regex(/^[0-9a-fA-F]{40}$/),
+  files: z.array(z.string().min(1)).min(1).max(200),
+  releaseNote: z.string().min(1).max(2_000),
+});
 
 server.registerTool("create_tasks", {
   description: "Create one or more Codex-authored tasks at the bottom of Backlog or Todo using the Goal, Details, Done when structure.",
@@ -159,10 +177,13 @@ server.registerTool("submit_for_review", {
     taskId: z.string(), sessionId: z.string().optional(), runId: z.string().optional(), summary: z.string().min(1),
     validation: z.array(z.string()).optional(), commit: z.string().optional(), limitations: z.array(z.string()).optional(),
     artifacts: z.array(artifactReference).optional(),
+    preview: previewReference.optional(),
+    commitProposal: commitProposal.optional().describe("Reviewed coding scope offered to the user for an explicit commit approval"),
   },
-}, async ({ taskId, sessionId, runId, summary, validation, commit, limitations, artifacts }) => {
+}, async ({ taskId, sessionId, runId, summary, validation, commit, limitations, artifacts, preview, commitProposal }) => {
   const result = tasks.submitForReview(taskId, {
-    sessionId: sessionId ?? process.env.CODEX_THREAD_ID, runId, summary, validation, commit, limitations, artifacts,
+    sessionId: sessionId ?? process.env.CODEX_THREAD_ID, runId, summary, validation, commit, limitations, artifacts, preview,
+    commitProposal,
   }, "codex");
   await notifications.process();
   return text(compactTask(result));

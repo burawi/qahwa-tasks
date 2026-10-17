@@ -206,6 +206,35 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .output-card ul { padding-left: 19px; display: grid; gap: 4px; }
 .output-card code, .output-card a { overflow-wrap: anywhere; word-break: break-word; }
 .output-card footer { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 4px; border-top: 1px solid color-mix(in srgb, var(--blue) 18%, var(--line)); }
+.review-preview { padding: 12px; border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line)); border-radius: 13px; background: var(--surface); display: grid; gap: 9px; }
+.review-preview:not(.available) { border-color: color-mix(in srgb, var(--red) 35%, var(--line)); }
+.review-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.review-preview-heading > div { display: grid; gap: 3px; }
+.review-preview-heading b { margin: 0; }
+.review-preview-heading strong { color: var(--green); font-size: 13px; }
+.review-preview:not(.available) .review-preview-heading strong { color: var(--red); }
+.preview-open, .preview-unavailable { min-height: 40px; padding: 9px 12px; border-radius: 10px; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 800; }
+.preview-open { background: var(--accent); color: white; text-decoration: none; }
+.preview-open svg { width: 16px; height: 16px; }
+.preview-unavailable { background: var(--red-soft); color: var(--red); }
+.review-preview > p { margin: 0; color: var(--muted); font-size: 12px; }
+.review-preview dl { margin: 0; display: grid; gap: 6px; }
+.review-preview dl > div { min-width: 0; display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 8px; }
+.review-preview dt { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.review-preview dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.commit-approval { padding: 12px; border: 1px solid color-mix(in srgb, var(--blue) 38%, var(--line)); border-radius: 13px; background: var(--surface); display: grid; gap: 9px; }
+.commit-approval.committed { border-color: color-mix(in srgb, var(--green) 40%, var(--line)); }
+.commit-approval-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.commit-approval-heading > div { display: flex; align-items: center; gap: 7px; }
+.commit-approval-heading svg { width: 17px; height: 17px; color: var(--blue); }
+.commit-approval-heading b { margin: 0; }
+.commit-approval > p, .commit-approval > small { margin: 0; }
+.commit-approval > small { color: var(--muted); font-size: 11px; }
+.commit-approval dl { margin: 0; display: grid; gap: 7px; }
+.commit-approval dl > div { min-width: 0; display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 8px; }
+.commit-approval dt { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.commit-approval dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.commit-approval dd ul { margin: 0; }
 .artifact-list { display: grid; gap: 9px; }
 .artifact-card { min-width: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line)); border-radius: 13px; background: var(--surface); }
 .artifact-preview { display: block; width: 100%; max-height: min(62dvh, 520px); object-fit: contain; background: #111; }

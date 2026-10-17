@@ -77,5 +77,8 @@ export const api = {
   activity: (id: string) => request<{ activity: Array<{ actor: string; eventType: string; createdAt: string }> }>(
     `/api/tasks/${id}/activity`,
   ),
+  approveCommit: (id: string, outputId: string) => request<{ task: TaskDetail }>(
+    `/api/tasks/${encodeURIComponent(id)}/outputs/${encodeURIComponent(outputId)}/approve-commit`, { method: "POST" },
+  ),
   exportData: () => request<Record<string, unknown>>("/api/export"),
 };

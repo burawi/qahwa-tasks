@@ -219,6 +219,11 @@ function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
       .header("content-length", end - start + 1)
       .send(createReadStream(artifact.path, { start, end }));
   });
+  app.post<{ Params: { id: string; outputId: string } }>(
+    "/api/tasks/:id/outputs/:outputId/approve-commit", async (request) => ({
+      task: context.tasks.approveOutputCommit(request.params.id, request.params.outputId, "user"),
+    }),
+  );
   app.get("/api/export", async (_request, reply) => reply
     .header("content-disposition", `attachment; filename="qahwa-tasks-${new Date().toISOString().slice(0, 10)}.json"`)
     .send(context.tasks.exportData()));
