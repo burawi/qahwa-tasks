@@ -1,4 +1,4 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
@@ -13,6 +13,18 @@ import { TaskService, type CreateTaskInput } from "./task-service.js";
 
 const publicRoot = join(process.cwd(), "dist/public");
 const legacyScriptRecovery = `void async function(){try{for(const key of await caches.keys())if(key.startsWith("qahwa-tasks-"))await caches.delete(key);const registration=await navigator.serviceWorker?.getRegistration();await registration?.update()}finally{const url=new URL("/",location.origin);url.searchParams.set("recovered",Date.now().toString());location.replace(url)}}();`;
+
+function currentStylesheetPath(): string | undefined {
+  try {
+    const html = readFileSync(join(publicRoot, "index.html"), "utf8");
+    const href = html.match(/<link\b[^>]*\bhref="(\/assets\/[A-Za-z0-9_.-]+\.css)"[^>]*>/i)?.[1];
+    if (!href) return undefined;
+    const path = join(publicRoot, href);
+    return existsSync(path) ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface AppContext {
   database: AppDatabase;
@@ -108,7 +120,9 @@ export async function buildApp(config: Config, database = new AppDatabase(config
           return reply.header("cache-control", "no-store").type("application/javascript").send(legacyScriptRecovery);
         }
         if (pathname.endsWith(".css")) {
-          return reply.header("cache-control", "no-store").type("text/css").send("/* retired release stylesheet */");
+          const stylesheet = currentStylesheetPath();
+          if (stylesheet) return reply.header("cache-control", "no-store").type("text/css").send(createReadStream(stylesheet));
+          return reply.header("cache-control", "no-store").code(503).send({ error: "stylesheet_unavailable" });
         }
         return reply.header("cache-control", "no-store").code(404).send({ error: "asset_not_found" });
       }

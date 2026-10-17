@@ -10,13 +10,13 @@ import { AppDatabase } from "../src/server/database.js";
 test("service worker purges poisoned caches and leaves release assets to HTTP caching", () => {
   const source = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 
-  assert.match(source, /qahwa-tasks-v5/);
+  assert.match(source, /qahwa-tasks-v6/);
   assert.doesNotMatch(source, /STATIC_ASSETS\s*=\s*\[[^\]]*["']\/["']/s);
   assert.match(source, /event\.request\.mode === "navigate"/);
   assert.match(source, /legacyCaches\.length > 0/);
   assert.doesNotMatch(source, /await .*client\.navigate/);
-  assert.match(source, /searchParams\.get\("recovery"\) === "v5"/);
-  assert.match(source, /recoveryUrl\.searchParams\.set\("recovery", "v5"\)/);
+  assert.match(source, /searchParams\.get\("recovery"\) === "v6"/);
+  assert.match(source, /recoveryUrl\.searchParams\.set\("recovery", "v6"\)/);
   assert.match(source, /client\.navigate\(recoveryUrl\.toString\(\)\)\.catch/);
   assert.match(source, /STATIC_ASSETS\.includes\(url\.pathname\)/);
   assert.doesNotMatch(source, /cache\.put\(event\.request/);
@@ -35,7 +35,7 @@ test("web delivery uses executable recovery responses for retired release hashes
   assert.match(source, /pathname\.startsWith\("\/assets\/"\)/);
   assert.match(source, /legacyScriptRecovery/);
   assert.match(source, /application\/javascript/);
-  assert.match(source, /retired release stylesheet/);
+  assert.match(source, /currentStylesheetPath/);
   assert.match(source, /asset_not_found/);
   assert.match(source, /pathname === "\/sw\.js"/);
   assert.match(source, /pathname === "\/boot\.js"/);
@@ -46,7 +46,7 @@ test("pre-bundle guard recovers once and makes bootstrap failures visible", () =
   const source = readFileSync(new URL("../public/boot.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
 
-  assert.match(html, /<script src="\/boot\.js\?v=5"><\/script>/);
+  assert.match(html, /<script src="\/boot\.js\?v=6"><\/script>/);
   assert.match(source, /api\/client-diagnostics/);
   assert.match(source, /getRegistrations/);
   assert.match(source, /qahwa-tasks-/);
@@ -75,11 +75,16 @@ test("unknown historical script and stylesheet hashes recover with safe MIME typ
     assert.equal(stylesheet.statusCode, 200);
     assert.match(stylesheet.headers["content-type"], /^text\/css/);
     assert.equal(stylesheet.headers["cache-control"], "no-store");
+    const html = readFileSync(new URL("../dist/public/index.html", import.meta.url), "utf8");
+    const currentHref = html.match(/href="(\/assets\/[A-Za-z0-9_.-]+\.css)"/)?.[1];
+    assert.ok(currentHref);
+    assert.equal(stylesheet.body, readFileSync(new URL(`../dist/public${currentHref}`, import.meta.url), "utf8"));
+    assert.ok(stylesheet.body.length > 1_000);
 
     const other = await app.inject({ method: "GET", url: "/assets/retired.png" });
     assert.equal(other.statusCode, 404);
 
-    const boot = await app.inject({ method: "GET", url: "/boot.js?v=5" });
+    const boot = await app.inject({ method: "GET", url: "/boot.js?v=6" });
     assert.equal(boot.statusCode, 200);
     assert.equal(boot.headers["cache-control"], "no-store");
 

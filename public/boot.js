@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var attemptKey = "qahwa-bootstrap-recovery-v5";
+  var attemptKey = "qahwa-bootstrap-recovery-v6";
   var ready = false;
   var timer;
 
@@ -58,7 +58,7 @@
       return Promise.all(keys.filter(function (key) { return key.indexOf("qahwa-tasks-") === 0; }).map(function (key) { return caches.delete(key); }));
     }));
     Promise.allSettled(work).then(function () {
-      location.replace("/?recovery=v5&bootstrap=" + Date.now());
+      location.replace("/?recovery=v6&bootstrap=" + Date.now());
     });
   }
 
