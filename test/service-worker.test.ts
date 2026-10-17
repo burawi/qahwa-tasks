@@ -15,3 +15,13 @@ test("web builds retain prior content-hashed assets for controlled clients", () 
   const source = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   assert.match(source, /emptyOutDir:\s*false/);
 });
+
+test("web delivery keeps recovery files visible and never masks missing assets with HTML", () => {
+  const source = readFileSync(new URL("../src/server/app.ts", import.meta.url), "utf8");
+
+  assert.match(source, /fastifyStatic, \{ root: publicRoot, wildcard: true \}/);
+  assert.match(source, /pathname\.startsWith\("\/assets\/"\)/);
+  assert.match(source, /asset_not_found/);
+  assert.match(source, /pathname === "\/sw\.js"/);
+  assert.match(source, /reply\.header\("cache-control", "no-store"\)/);
+});

@@ -43,7 +43,14 @@ export async function buildApp(config: Config, database = new AppDatabase(config
       ? "default-src 'none'; frame-ancestors 'self'; sandbox"
       : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; media-src 'self' https: http:; frame-src 'self' https: http:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     if (config.publicBaseUrl.startsWith("https://")) reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
-    if (request.url.startsWith("/api/")) reply.header("cache-control", "no-store");
+    const pathname = request.url.split("?", 1)[0] ?? request.url;
+    if (request.url.startsWith("/api/") || pathname === "/sw.js" || pathname === "/manifest.webmanifest") {
+      reply.header("cache-control", "no-store");
+    } else if (pathname.startsWith("/assets/") && reply.statusCode < 400) {
+      reply.header("cache-control", "public, max-age=31536000, immutable");
+    } else if (reply.getHeader("content-type")?.toString().startsWith("text/html")) {
+      reply.header("cache-control", "no-store");
+    }
     return payload;
   });
 
@@ -74,9 +81,16 @@ export async function buildApp(config: Config, database = new AppDatabase(config
   registerCommentRoutes(app, context);
 
   if (existsSync(publicRoot)) {
-    await app.register(fastifyStatic, { root: publicRoot, wildcard: false });
+    // Resolve files at request time. Exact routes snapshot the directory during
+    // startup, so assets restored by an in-place release remain invisible until
+    // another restart and stale installed clients cannot recover.
+    await app.register(fastifyStatic, { root: publicRoot, wildcard: true });
     app.setNotFoundHandler((request, reply) => {
       if (request.url.startsWith("/api/")) return reply.code(404).send({ error: "not_found" });
+      const pathname = request.url.split("?", 1)[0] ?? request.url;
+      if (pathname.startsWith("/assets/")) {
+        return reply.header("cache-control", "no-store").code(404).send({ error: "asset_not_found" });
+      }
       return reply.type("text/html").sendFile("index.html");
     });
   }
