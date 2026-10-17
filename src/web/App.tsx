@@ -5,6 +5,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import type { Project, TaskSummary } from "../domain/types";
 import { api, ApiError } from "./api";
 import { TaskCard } from "./components/TaskCard";
+import { preferredCreateProjectId, readLastCreateProjectId, writeLastCreateProjectId } from "./project-preference";
 
 const CreateTask = lazy(() => import("./components/CreateTask").then((module) => ({ default: module.CreateTask })));
 const ProjectManager = lazy(() => import("./components/ProjectManager").then((module) => ({ default: module.ProjectManager })));
@@ -28,6 +29,7 @@ export function App() {
   const [selectedTask, setSelectedTask] = useState<string | null>(() => taskFromPath());
   const [showCreate, setShowCreate] = useState(false);
   const [showProjects, setShowProjects] = useState(false);
+  const [lastCreateProjectId, setLastCreateProjectId] = useState(() => readLastCreateProjectId());
   const [toast, setToast] = useState("");
   const [offline, setOffline] = useState(!navigator.onLine);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }), useSensor(TouchSensor, { activationConstraint: { delay: 180, tolerance: 6 } }));
@@ -47,6 +49,12 @@ export function App() {
   useEffect(() => {
     if (projectId && projects.length > 0 && !projects.some((project) => project.id === projectId && !project.archivedAt)) setProjectId("");
   }, [projectId, projects]);
+  useEffect(() => {
+    if (lastCreateProjectId && projects.length > 0 && !projects.some((project) => project.id === lastCreateProjectId && !project.archivedAt)) {
+      writeLastCreateProjectId();
+      setLastCreateProjectId(undefined);
+    }
+  }, [lastCreateProjectId, projects]);
   useEffect(() => {
     const online = () => setOffline(false); const offlineHandler = () => setOffline(true);
     window.addEventListener("online", online); window.addEventListener("offline", offlineHandler);
@@ -85,6 +93,7 @@ export function App() {
   if (!auth.authenticated) return <Login onSuccess={() => setAuth({ loading: false, authenticated: true, configured: true })} onError={fail} />;
 
   const activeProjects = projects.filter((project) => !project.archivedAt);
+  const initialCreateProjectId = preferredCreateProjectId(activeProjects, lastCreateProjectId, projectId);
   const openGroups = tab === "open" ? [
     { label: "In progress", items: tasks.filter((task) => task.status === "in_progress") },
     { label: "In review", items: tasks.filter((task) => task.status === "in_review") },
@@ -107,9 +116,14 @@ export function App() {
     <nav className="bottom-tabs">{TABS.map(({ id, label, icon: Icon }) => <button key={id} type="button" className={tab === id ? "active" : ""} onClick={() => setTab(id)}><Icon /><span>{label}</span>{counts[id] > 0 && <b>{counts[id]}</b>}</button>)}</nav>
 
     <Suspense fallback={<div className="screen-loading">Loading…</div>}>
-    {showCreate && <CreateTask projects={activeProjects} initialProjectId={projectId || undefined} status={tab as "backlog" | "todo"} onCancel={() => setShowCreate(false)} onSave={async (value) => {
+    {showCreate && <CreateTask projects={activeProjects} initialProjectId={initialCreateProjectId} status={tab as "backlog" | "todo"} onCancel={() => setShowCreate(false)} onProjectChange={(nextProjectId) => {
+      writeLastCreateProjectId(nextProjectId);
+      setLastCreateProjectId(nextProjectId);
+    }} onSave={async (value) => {
       try {
         const result = await api.createTask(value);
+        writeLastCreateProjectId(value.projectId);
+        setLastCreateProjectId(value.projectId);
         setShowCreate(false);
         if (projectId && projectId !== value.projectId) setProjectId(value.projectId);
         const visible = await api.tasks(tab, projectId ? value.projectId : undefined);
