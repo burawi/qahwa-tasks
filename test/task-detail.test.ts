@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ArtifactPreview, PreviewOutput, RelatedTaskList, statusActions } from "../src/web/components/TaskDetail.js";
+import { ArtifactPreview, RelatedTaskList, statusActions } from "../src/web/components/TaskDetail.js";
 
 test("in-review task actions omit Request changes and retain Mark completed", () => {
   assert.deepEqual(statusActions("in_review"), [
@@ -38,22 +38,4 @@ test("artifact cards render responsive media controls and safe missing placehold
   } }));
   assert.match(missing, /no longer available/);
   assert.doesNotMatch(missing, /href=/);
-});
-
-test("preview output distinguishes local review from production and hides stopped links", () => {
-  const available = renderToStaticMarkup(React.createElement(PreviewOutput, { preview: {
-    url: "https://workstation.tailnet.ts.net:4173/", startCommand: "npm run preview -- --host 0.0.0.0",
-    processOwner: "Codex session 123", availability: "available", checkedAt: "2026-10-17T09:00:00.000Z",
-  } }));
-  assert.match(available, /Open preview/);
-  assert.match(available, /not a production deployment/);
-  assert.match(available, /href="https:\/\/workstation.tailnet.ts.net:4173\/"/);
-
-  const stopped = renderToStaticMarkup(React.createElement(PreviewOutput, { preview: {
-    url: "http://100.64.0.10:4173/", startCommand: "npm run dev:web -- --host 0.0.0.0",
-    processOwner: "Codex session 123", availability: "stopped", checkedAt: "2026-10-17T09:00:00.000Z",
-  } }));
-  assert.match(stopped, /Preview unavailable/);
-  assert.match(stopped, /Stopped/);
-  assert.doesNotMatch(stopped, /href=/);
 });

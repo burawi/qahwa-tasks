@@ -67,17 +67,6 @@ For completed coding work that is suitable for a scoped commit, include `commitP
 - Approval never pushes, publishes, or deploys. A successful commit is collected in the project's single active `Publish/deploy changes` Todo for later explicit instructions.
 - If approval fails, inspect the reported drift or scope conflict and submit a fresh reviewed output when appropriate. Never broaden the scope to make approval pass.
 
-### Frontend review previews
-
-For a frontend task that can be safely previewed, run it with representative mock data and no production credentials or destructive integrations. Bind only the review server needed for the task, expose it through the machine's approved Tailscale address, and include `preview` in `submit_for_review` with the exact URL, reproducible start command, process owner, availability, and latest check time.
-
-- Confirm the page locally and from another authorized Tailscale device before recording `available`.
-- Describe it as a local review preview, never as a deployed environment.
-- After revisions, restart or refresh the process and re-check the exact URL before submitting a new output.
-- Record `stopped`, `failed`, or `unreachable` whenever the link is not usable; never leave a known-dead preview marked available.
-- Stop the process with its owning process manager or recorded PID after review, then report the stopped state in the next output. Do not use broad process-kill commands.
-- If safe mock data or an approved Tailscale address is unavailable, omit the preview and state the limitation instead of connecting production systems.
-
 ## Review and closure
 
 - Review feedback moves a task from `in_review` to `in_progress` using `return_to_work`.

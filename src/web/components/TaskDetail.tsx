@@ -1,6 +1,6 @@
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileOutput, GitCommitHorizontal, History, MessageCircle, Pencil, Play, RotateCcw, Trash2, X } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
-import { documentFromPlainText, emptyDocument, type RelatedTask, type RichTextDocument, type TaskArtifact, type TaskComment, type TaskDetail as TaskDetailType, type TaskPreview, type TaskStatus } from "../../domain/types";
+import { documentFromPlainText, emptyDocument, type RelatedTask, type RichTextDocument, type TaskArtifact, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
 import { api } from "../api";
 import { projectColorStyle } from "../project-color";
 import { RichEditor, RichView } from "./RichEditor";
@@ -92,7 +92,6 @@ export function TaskDetail({ taskId, onClose, onNavigate, onChanged, onError }: 
         {task.outputs.length === 0 && <p className="empty-note">No work output has been submitted yet.</p>}
         {task.outputs.map((output) => <article className="output-card" key={output.id}>
           <header><strong>{output.summary}</strong><time>{formatDate(output.createdAt)}</time></header>
-          {output.preview && <PreviewOutput preview={output.preview} />}
           {output.commitApproval && <CommitApprovalOutput
             approval={output.commitApproval}
             eligible={task.status === "in_review"}
@@ -170,29 +169,6 @@ export function CommitApprovalOutput({ approval, eligible, busy = false, onAppro
     {!committed && !eligible && <small>Commit approval is available while this task is in review.</small>}
     <small>This action commits only the reviewed files. It does not start Codex, push, publish, or deploy.</small>
   </section>;
-}
-
-export function PreviewOutput({ preview }: { preview: TaskPreview }) {
-  const available = preview.availability === "available";
-  return <section className={`review-preview ${preview.availability}`}>
-    <div className="review-preview-heading">
-      <div><b>Local review preview</b><strong>{available ? "Available" : previewStatus(preview.availability)}</strong></div>
-      {available
-        ? <a className="preview-open" href={preview.url} target="_blank" rel="noreferrer"><ExternalLink />Open preview</a>
-        : <span className="preview-unavailable">Preview unavailable</span>}
-    </div>
-    <p>This is a local Tailscale review environment, not a production deployment.</p>
-    <dl>
-      <div><dt>URL</dt><dd><code>{preview.url}</code></dd></div>
-      <div><dt>Start</dt><dd><code>{preview.startCommand}</code></dd></div>
-      <div><dt>Owner</dt><dd>{preview.processOwner}</dd></div>
-      <div><dt>Checked</dt><dd>{formatDate(preview.checkedAt)}</dd></div>
-    </dl>
-  </section>;
-}
-
-function previewStatus(value: TaskPreview["availability"]): string {
-  return ({ available: "Available", stopped: "Stopped", failed: "Failed", unreachable: "Unreachable" })[value];
 }
 
 export function ArtifactPreview({ artifact }: { artifact: TaskArtifact }) {

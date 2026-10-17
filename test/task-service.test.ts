@@ -93,10 +93,6 @@ test("appends structured outputs chronologically with complete provenance", () =
     tasks.submitForReview(created.id, {
       sessionId: "session-1", runId: "run-1", summary: "First pass", validation: ["Unit tests"],
       commit: "abc123", limitations: ["No browser QA"], artifacts: ["dist/report.json"],
-      preview: {
-        url: "https://workstation.tailnet.ts.net:4173", startCommand: "npm run preview -- --host 0.0.0.0",
-        processOwner: "Codex session session-1", availability: "available", checkedAt: "2026-10-17T09:00:00.000Z",
-      },
     }, "codex");
     tasks.transition(created.id, { to: "in_progress" }, "codex");
     tasks.submitForReview(created.id, { sessionId: "session-2", summary: "Revision" }, "codex");
@@ -107,28 +103,37 @@ test("appends structured outputs chronologically with complete provenance", () =
     assert.deepEqual(outputs[0]?.limitations, ["No browser QA"]);
     assert.equal(outputs[0]?.artifacts[0]?.source, "dist/report.json");
     assert.equal(outputs[0]?.artifacts[0]?.availability, "missing");
-    assert.deepEqual(outputs[0]?.preview, {
-      url: "https://workstation.tailnet.ts.net:4173/", startCommand: "npm run preview -- --host 0.0.0.0",
-      processOwner: "Codex session session-1", availability: "available", checkedAt: "2026-10-17T09:00:00.000Z",
-    });
-    assert.equal(outputs[1]?.preview, null);
     assert.equal(outputs[1]?.summary, "Revision");
     assert.notEqual(outputs[0]?.id, outputs[1]?.id);
   } finally { database.close(); }
 });
 
-test("rejects preview URLs outside the approved Tailscale network", () => {
+test("removes legacy frontend preview metadata without disturbing task outputs", () => {
   const { database, tasks, project } = fixture();
+  const created = tasks.createTask({ projectId: project.id, title: "Legacy preview", status: "todo" }, "codex");
+  tasks.transition(created.id, { to: "in_progress" }, "codex");
+  tasks.addOutput(created.id, { summary: "Keep this output", artifacts: ["dist/report.json"] }, "codex");
+  database.db.exec("ALTER TABLE task_outputs ADD COLUMN preview_json TEXT");
+  database.db.prepare("UPDATE task_outputs SET preview_json = ? WHERE task_id = ?").run(
+    JSON.stringify({ url: "https://workstation.tailnet.ts.net:4173/", availability: "available" }),
+    created.id,
+  );
+  const path = database.path;
+  const dataDir = database.dataDir;
+  database.close();
+
+  const reopened = new AppDatabase({
+    host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
+    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
+    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+  }, path);
   try {
-    const created = tasks.createTask({ projectId: project.id, title: "Unsafe preview", status: "todo" }, "codex");
-    tasks.transition(created.id, { to: "in_progress" }, "codex");
-    assert.throws(() => tasks.addOutput(created.id, {
-      summary: "Preview", preview: {
-        url: "http://127.0.0.1:4173", startCommand: "npm run dev:web", processOwner: "Codex session",
-        availability: "available",
-      },
-    }, "codex"), /approved Tailscale address/);
-  } finally { database.close(); }
+    const columns = reopened.db.prepare("PRAGMA table_info(task_outputs)").all() as Array<{ name: string }>;
+    assert.equal(columns.some((column) => column.name === "preview_json"), false);
+    const output = new TaskService(reopened).getTask(created.id).outputs[0];
+    assert.equal(output?.summary, "Keep this output");
+    assert.equal(output?.artifacts[0]?.source, "dist/report.json");
+  } finally { reopened.close(); }
 });
 
 test("migrates legacy handoff comments into structured outputs without removing history", () => {

@@ -77,7 +77,6 @@ CREATE TABLE IF NOT EXISTS task_outputs (
   session_id TEXT,
   run_id TEXT,
   artifacts_json TEXT NOT NULL DEFAULT '[]',
-  preview_json TEXT,
   commit_proposal_json TEXT,
   commit_approval_status TEXT,
   approved_commit_hash TEXT,
@@ -165,7 +164,7 @@ export class AppDatabase {
       if (!columns.has(name)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
     }
     const outputColumns = new Set((this.db.prepare("PRAGMA table_info(task_outputs)").all() as Array<{ name: string }>).map((row) => row.name));
-    if (!outputColumns.has("preview_json")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN preview_json TEXT");
+    if (outputColumns.has("preview_json")) this.db.exec("ALTER TABLE task_outputs DROP COLUMN preview_json");
     if (!outputColumns.has("commit_proposal_json")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN commit_proposal_json TEXT");
     if (!outputColumns.has("commit_approval_status")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN commit_approval_status TEXT");
     if (!outputColumns.has("approved_commit_hash")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN approved_commit_hash TEXT");

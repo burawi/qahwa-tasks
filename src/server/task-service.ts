@@ -13,14 +13,12 @@ import {
   type HandoffInput,
   type Project,
   type ProjectLogo,
-  type PreviewReference,
   type RelatedTask,
   type RichTextDocument,
   type TaskComment,
   type TaskDetail,
   type TaskOutcome,
   type TaskOutput,
-  type TaskPreview,
   type TaskArtifact,
   type TaskStatus,
   type TaskSummary,
@@ -50,7 +48,6 @@ interface CommentRow {
 interface OutputRow {
   id: string; task_id: string; summary: string; validation_json: string; commit_hash: string | null;
   limitations_json: string; session_id: string | null; run_id: string | null; artifacts_json: string;
-  preview_json: string | null;
   commit_proposal_json: string | null; commit_approval_status: "pending" | "processing" | "committed" | null;
   approved_commit_hash: string | null;
   source_comment_id: string | null; created_at: string;
@@ -468,7 +465,6 @@ export class TaskService {
     const validation = this.outputList(input.validation);
     const limitations = this.outputList(input.limitations);
     const artifacts = this.artifactList(input.artifacts);
-    const preview = this.previewReference(input.preview);
     assertDomain(!(input.commit && input.commitProposal), "An output cannot contain both an existing commit and a commit proposal", "invalid_output");
     const proposal = input.commitProposal ? this.reviewedCommits.prepare(task.rootDirectory, input.commitProposal) : null;
     const id = randomUUID();
@@ -476,13 +472,12 @@ export class TaskService {
     this.database.db.prepare(`
       INSERT INTO task_outputs
       (id, task_id, summary, validation_json, commit_hash, limitations_json, session_id, run_id, artifacts_json,
-       preview_json, commit_proposal_json, commit_approval_status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       commit_proposal_json, commit_approval_status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, task.id, summary, JSON.stringify(validation), input.commit?.trim() || null,
       JSON.stringify(limitations), input.sessionId?.trim() || null, input.runId?.trim() || null,
-      JSON.stringify(artifacts), preview ? JSON.stringify(preview) : null,
-      proposal ? JSON.stringify(proposal) : null, proposal ? "pending" : null, createdAt,
+      JSON.stringify(artifacts), proposal ? JSON.stringify(proposal) : null, proposal ? "pending" : null, createdAt,
     );
     this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "output.created", details: { outputId: id } });
     return this.outputById(id);
@@ -677,7 +672,6 @@ export class TaskService {
       validation: JSON.parse(row.validation_json) as string[], commit: row.commit_hash,
       limitations: JSON.parse(row.limitations_json) as string[], sessionId: row.session_id, runId: row.run_id,
       artifacts: stored.map((artifact, index) => this.describeArtifact(row.task_id, row.id, index, artifact, rootDirectory)),
-      preview: row.preview_json ? JSON.parse(row.preview_json) as TaskPreview : null,
       commitApproval: this.commitApproval(row),
       sourceCommentId: row.source_comment_id, createdAt: row.created_at,
     };
@@ -794,33 +788,6 @@ export class TaskService {
       }
     }
     return result;
-  }
-
-  private previewReference(value: PreviewReference | undefined): TaskPreview | null {
-    if (!value) return null;
-    let url: URL;
-    try { url = new URL(value.url.trim()); }
-    catch { throw new DomainError("Preview URL is invalid", "invalid_output"); }
-    assertDomain(["http:", "https:"].includes(url.protocol), "Preview URL must use HTTP or HTTPS", "invalid_output");
-    assertDomain(this.isTailscaleHost(url.hostname), "Preview URL must use an approved Tailscale address", "invalid_output");
-    const startCommand = value.startCommand.trim();
-    const processOwner = value.processOwner.trim();
-    assertDomain(startCommand.length > 0 && startCommand.length <= 2_000, "Preview start command is invalid", "invalid_output");
-    assertDomain(processOwner.length > 0 && processOwner.length <= 200, "Preview process owner is invalid", "invalid_output");
-    const checkedAt = value.checkedAt?.trim() || now();
-    assertDomain(!Number.isNaN(Date.parse(checkedAt)), "Preview checked time is invalid", "invalid_output");
-    return { url: url.toString(), startCommand, processOwner, availability: value.availability, checkedAt };
-  }
-
-  private isTailscaleHost(hostname: string): boolean {
-    const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    if (normalized.endsWith(".ts.net")) return true;
-    const parts = normalized.split(".").map(Number);
-    if (parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
-      const [first = -1, second = -1] = parts;
-      return first === 100 && second >= 64 && second <= 127;
-    }
-    return normalized.startsWith("fd7a:115c:a1e0:");
   }
 
   private describeArtifact(

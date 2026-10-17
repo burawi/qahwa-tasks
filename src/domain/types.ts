@@ -90,7 +90,6 @@ export interface TaskOutput {
   sessionId: string | null;
   runId: string | null;
   artifacts: TaskArtifact[];
-  preview: TaskPreview | null;
   commitApproval: CommitApproval | null;
   sourceCommentId: string | null;
   createdAt: string;
@@ -113,7 +112,6 @@ export interface HandoffInput {
   commit?: string;
   limitations?: string[];
   artifacts?: ArtifactReference[];
-  preview?: PreviewReference;
   commitProposal?: CommitProposal;
 }
 
@@ -128,20 +126,6 @@ export interface CommitProposal {
 export interface CommitApproval extends CommitProposal {
   status: "pending" | "committed";
   commitHash: string | null;
-}
-
-export type PreviewAvailability = "available" | "stopped" | "failed" | "unreachable";
-
-export interface PreviewReference {
-  url: string;
-  startCommand: string;
-  processOwner: string;
-  availability: PreviewAvailability;
-  checkedAt?: string;
-}
-
-export interface TaskPreview extends PreviewReference {
-  checkedAt: string;
 }
 
 export type ArtifactReference = string | {
