@@ -7,7 +7,9 @@ export default defineConfig({
   publicDir: "../../public",
   build: {
     outDir: "../../dist/public",
-    emptyOutDir: true,
+    // Keep prior content-hashed chunks so an already-open client can finish
+    // loading them while a new release is deployed.
+    emptyOutDir: false,
   },
   server: {
     proxy: { "/api": "http://127.0.0.1:3022" },
