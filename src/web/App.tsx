@@ -126,12 +126,15 @@ export function App() {
 }
 
 function Login({ onSuccess, onError }: { onSuccess: () => void; onError: (message: string) => void }) {
-  const [password, setPassword] = useState(""); const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false);
   return <main className="login-page"><form onSubmit={async (event) => {
-    event.preventDefault(); setBusy(true);
+    event.preventDefault();
+    const password = String(new FormData(event.currentTarget).get("password") ?? "");
+    if (!password) { onError("Enter your password"); return; }
+    setBusy(true);
     try { await api.login(password); onSuccess(); } catch (error) { onError(error instanceof Error ? error.message : "Login failed"); }
     finally { setBusy(false); }
-  }}><div className="coffee-mark">✓</div><h1>Qahwa Tasks</h1><p>Your private workspace</p><label>Password<input autoFocus type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary" disabled={busy || !password} type="submit">{busy ? "Signing in…" : "Sign in"}</button></form></main>;
+  }}><div className="coffee-mark">✓</div><h1>Qahwa Tasks</h1><p>Your private workspace</p><label>Password<input autoFocus required name="password" type="password" autoComplete="current-password" /></label><button className="primary" disabled={busy} type="submit">{busy ? "Signing in…" : "Sign in"}</button></form></main>;
 }
 
 function SetupRequired({ onSuccess, onError }: { onSuccess: () => void; onError: (message: string) => void }) {
@@ -142,12 +145,16 @@ function SetupRequired({ onSuccess, onError }: { onSuccess: () => void; onError:
   if (!token) return <main className="login-page"><div className="setup-card"><div className="coffee-mark">✓</div><h1>Setup required</h1><p>Open the secure setup link delivered through Qahwa Notify.</p></div></main>;
   return <main className="login-page"><form onSubmit={async (event) => {
     event.preventDefault();
-    if (password !== confirmation) { onError("Passwords do not match"); return; }
+    const values = new FormData(event.currentTarget);
+    const submittedPassword = String(values.get("password") ?? "");
+    const submittedConfirmation = String(values.get("confirmation") ?? "");
+    if (submittedPassword.length < 12) { onError("Use at least 12 characters"); return; }
+    if (submittedPassword !== submittedConfirmation) { onError("Passwords do not match"); return; }
     setBusy(true);
-    try { await api.setup(password, token); history.replaceState({}, "", "/"); onSuccess(); }
+    try { await api.setup(submittedPassword, token); history.replaceState({}, "", "/"); onSuccess(); }
     catch (error) { onError(error instanceof Error ? error.message : "Setup failed"); }
     finally { setBusy(false); }
-  }}><div className="coffee-mark">✓</div><h1>Choose your password</h1><p>This setup link expires after 15 minutes and works once.</p><label>Password<input autoFocus type="password" minLength={12} maxLength={256} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><label>Confirm password<input type="password" minLength={12} maxLength={256} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label><button className="primary" disabled={busy || password.length < 12 || password !== confirmation} type="submit">{busy ? "Securing app…" : "Save password"}</button></form></main>;
+  }}><div className="coffee-mark">✓</div><h1>Choose your password</h1><p>This setup link expires after 15 minutes and works once.</p><label>Password<input autoFocus required name="password" type="password" minLength={12} maxLength={256} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><small className="form-hint">At least 12 characters</small><label>Confirm password<input required name="confirmation" type="password" minLength={12} maxLength={256} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>{confirmation && password !== confirmation && <small className="form-hint error">Passwords do not match</small>}<button className="primary" disabled={busy} type="submit">{busy ? "Securing app…" : "Save password"}</button></form></main>;
 }
 
 function EmptyState({ compact = false }: { compact?: boolean }) {

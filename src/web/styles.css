@@ -217,6 +217,8 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .login-page .coffee-mark, .setup-card .coffee-mark { width: 54px; height: 54px; border-radius: 18px; }
 .login-page h1, .setup-card h1 { margin: 3px 0 -11px; letter-spacing: -.035em; }
 .login-page p, .setup-card p { margin: 0 0 5px; color: var(--muted); }
+.form-hint { margin-top: -10px; color: var(--muted); font-size: 12px; }
+.form-hint.error { color: var(--red); }
 .setup-card code { padding: 12px; border-radius: 11px; background: var(--bg); color: var(--accent); overflow-wrap: anywhere; }
 .splash { align-content: center; gap: 8px; }
 .splash h1 { font-size: 18px; }
