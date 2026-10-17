@@ -134,7 +134,8 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .format-bar button { display: grid; place-items: center; width: 33px; height: 33px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); }
 .format-bar button.active { background: var(--accent-soft); color: var(--accent); }
 .format-bar svg { width: 17px; height: 17px; }
-.rich-view { line-height: 1.55; overflow-wrap: anywhere; }
+.rich-view { min-width: 0; max-width: 100%; line-height: 1.55; overflow-wrap: anywhere; }
+.rich-view .tiptap, .rich-view li > div { min-width: 0; max-width: 100%; }
 .rich-view > :first-child { margin-top: 0; }
 .rich-view > :last-child { margin-bottom: 0; }
 .rich-view h3 { margin: 19px 0 5px; font-size: 13px; text-transform: uppercase; letter-spacing: .055em; color: var(--accent); }
@@ -142,6 +143,8 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .rich-view ul, .rich-view ol { margin: 8px 0; padding-left: 22px; }
 .rich-view ul[data-type="taskList"] { padding: 0; list-style: none; }
 .rich-view ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 8px; }
+.rich-view a, .rich-view code { overflow-wrap: anywhere; word-break: break-word; }
+.rich-view pre { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .rich-view a { color: var(--accent); }
 .rich-view mark { background: var(--yellow-soft); color: inherit; border-radius: 3px; padding: 0 2px; }
 
@@ -150,7 +153,8 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .detail-header > div { flex: 1; display: grid; min-width: 0; }
 .detail-header span { font-size: 12px; color: var(--accent); font-weight: 800; letter-spacing: .04em; }
 .detail-header small { color: var(--muted); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.detail-content, .project-list { max-width: 760px; margin: 0 auto; padding: 20px 16px calc(40px + env(safe-area-inset-bottom)); display: grid; gap: 22px; }
+.detail-content, .project-list { width: 100%; max-width: 760px; margin: 0 auto; padding: 20px 16px calc(40px + env(safe-area-inset-bottom)); display: grid; gap: 22px; }
+.detail-content > *, .comments-section, .comment-thread, .comment-bubble, .resolved-comments { min-width: 0; max-width: 100%; }
 .detail-loading { display: grid; min-height: 100dvh; place-items: center; color: var(--muted); }
 .task-copy h1 { margin: 0 0 15px; font-size: clamp(24px, 7vw, 34px); letter-spacing: -.035em; line-height: 1.12; }
 .edit-panel { display: grid; gap: 16px; }
@@ -175,7 +179,7 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .comment-bubble > div:first-child { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
 .comment-bubble strong { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); }
 .comment-bubble time { color: var(--muted); font-size: 11px; }
-.comment-bubble code { display: inline-block; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.comment-bubble code { display: inline-block; max-width: 100%; margin-top: 8px; color: var(--muted); font-size: 11px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .comment-actions { display: flex; gap: 15px; padding-top: 8px; border-top: 1px solid var(--line); }
 .comment-actions button { padding: 4px 0; border: 0; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 4px; }
 .comment-actions svg { width: 14px; height: 14px; }
