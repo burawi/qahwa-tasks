@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import type { Project } from "../../domain/types";
 import { api } from "../api";
 import { projectColorStyle } from "../project-color";
+import { projectLogoValidationError } from "../project-logo";
+import { ProjectLogo } from "./ProjectLogo";
 
 export function ProjectManager({ onClose, onChanged, onError }: { onClose: () => void; onChanged: () => void; onError: (message: string) => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -18,8 +20,8 @@ export function ProjectManager({ onClose, onChanged, onError }: { onClose: () =>
     <main className="project-list">
       <button className="add-project-card" type="button" onClick={() => setEditing("new")}><Plus />Add project</button>
       {projects.map((project) => <article key={project.id} className={`project-card project-accent${project.archivedAt ? " archived" : ""}`} style={projectColorStyle(project.id)}>
-        <div className="prefix-badge">{project.prefix}</div>
-        <div><strong>{project.name}</strong><code>{project.rootDirectory}</code><small>{project.taskCount} task{project.taskCount === 1 ? "" : "s"}{project.archivedAt ? " · Archived" : ""}</small></div>
+        <ProjectLogo logo={project.logo} prefix={project.prefix} size="large" />
+        <div><strong>{project.name} <span className="project-prefix-inline">{project.prefix}</span></strong><code>{project.rootDirectory}</code><small>{project.taskCount} task{project.taskCount === 1 ? "" : "s"}{project.archivedAt ? " · Archived" : ""}</small></div>
         <div className="project-actions">
           <button type="button" onClick={() => setEditing(project)} aria-label="Edit"><Pencil /></button>
           <button type="button" onClick={() => void act(() => api.archiveProject(project.id, !project.archivedAt))} aria-label={project.archivedAt ? "Restore" : "Archive"}>{project.archivedAt ? <ArchiveRestore /> : <Archive />}</button>
@@ -36,7 +38,11 @@ export function ProjectManager({ onClose, onChanged, onError }: { onClose: () =>
         }}><LogOut />Log out all devices</button>
       </section>
     </main>
-    {editing && <ProjectForm project={editing === "new" ? undefined : editing} onCancel={() => setEditing(null)} onSave={(value) => void act(() => editing === "new" ? api.createProject(value) : api.updateProject(editing.id, value))} />}
+    {editing && <ProjectForm project={editing === "new" ? undefined : editing} onCancel={() => setEditing(null)} onSave={(value, logo, removeLogo) => act(async () => {
+      const saved = editing === "new" ? await api.createProject(value) : await api.updateProject(editing.id, value);
+      if (logo) await api.uploadProjectLogo(saved.project.id, logo);
+      else if (removeLogo && saved.project.logo) await api.removeProjectLogo(saved.project.id);
+    })} />}
   </div>;
 }
 
@@ -75,17 +81,39 @@ function base64(value: Uint8Array): string {
 function ProjectForm({ project, onCancel, onSave }: {
   project?: Project;
   onCancel: () => void;
-  onSave: (value: { name: string; prefix?: string; rootDirectory: string }) => void;
+  onSave: (value: { name: string; prefix?: string; rootDirectory: string }, logo: File | null, removeLogo: boolean) => Promise<void>;
 }) {
   const [name, setName] = useState(project?.name ?? "");
   const [prefix, setPrefix] = useState(project?.prefix ?? "");
   const [rootDirectory, setRootDirectory] = useState(project?.rootDirectory ?? "/home/burawi/");
+  const [logo, setLogo] = useState<File | null>(null);
+  const [removeLogo, setRemoveLogo] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const [saving, setSaving] = useState(false);
   const suggested = name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3);
-  return <div className="modal-backdrop"><form className="form-modal" onSubmit={(event) => { event.preventDefault(); onSave({ name, prefix: prefix || suggested, rootDirectory }); }}>
+  return <div className="modal-backdrop"><form className="form-modal" onSubmit={(event) => {
+    event.preventDefault();
+    setSaving(true);
+    void onSave({ name, prefix: prefix || suggested, rootDirectory }, logo, removeLogo).finally(() => setSaving(false));
+  }}>
     <div className="form-heading"><div><h2>{project ? "Edit project" : "New project"}</h2><p>The prefix becomes permanent after the first task.</p></div><button type="button" className="icon-button" onClick={onCancel}><X /></button></div>
     <label>Name<input autoFocus required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="Wassala" /></label>
     <label>Task prefix<input required minLength={2} maxLength={6} disabled={Boolean(project?.taskCount)} value={prefix || suggested} onChange={(event) => setPrefix(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))} placeholder="WAS" /></label>
     <label>Root directory<input required value={rootDirectory} onChange={(event) => setRootDirectory(event.target.value)} placeholder="/home/burawi/wassala" /></label>
-    <div className="button-row"><button type="button" className="secondary" onClick={onCancel}>Cancel</button><button type="submit" className="primary">Save project</button></div>
+    <div className="logo-field">
+      <div className="logo-preview"><ProjectLogo logo={removeLogo ? null : project?.logo ?? null} prefix={prefix || suggested || "PRJ"} size="large" /><div><strong>Project logo</strong><small>PNG, JPEG, or WebP · up to 256 KB</small>{logo && <small>{logo.name}</small>}</div></div>
+      <label className="secondary file-button">Choose image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+        const file = event.target.files?.[0] ?? null;
+        setLogoError("");
+        if (!file) { setLogo(null); return; }
+        const validationError = projectLogoValidationError(file);
+        if (validationError) { setLogo(null); setLogoError(validationError); return; }
+        setLogo(file); setRemoveLogo(false);
+      }} /></label>
+      {project?.logo && !removeLogo && !logo && <button type="button" className="danger-subtle" onClick={() => setRemoveLogo(true)}>Remove logo</button>}
+      {removeLogo && <button type="button" className="secondary" onClick={() => setRemoveLogo(false)}>Keep current logo</button>}
+      {logoError && <small className="form-hint error">{logoError}</small>}
+    </div>
+    <div className="button-row"><button type="button" className="secondary" disabled={saving} onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={saving || Boolean(logoError)}>{saving ? "Saving…" : "Save project"}</button></div>
   </form></div>;
 }

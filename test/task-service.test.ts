@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -97,5 +97,38 @@ test("protects edits with optimistic task versions", () => {
     const task = tasks.createTask({ projectId: project.id, title: "Versioned" }, "user");
     tasks.updateTask(task.id, { title: "Changed", expectedVersion: 1 }, "user");
     assert.throws(() => tasks.updateTask(task.id, { title: "Stale", expectedVersion: 1 }, "codex"), /changed since/);
+  } finally { database.close(); }
+});
+
+test("persists, replaces, exposes, and removes validated project logos", () => {
+  const { database, tasks, project } = fixture();
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  try {
+    const uploaded = tasks.uploadProjectLogo(project.id, png, "image/png", "user");
+    assert.equal(uploaded.logo?.mimeType, "image/png");
+    assert.equal(uploaded.logo?.size, png.length);
+    assert.match(uploaded.logo?.url ?? "", new RegExp(`/api/projects/${project.id}/logo`));
+    const task = tasks.createTask({ projectId: project.id, title: "Branded task" }, "user");
+    assert.deepEqual(task.projectLogo, uploaded.logo);
+    const firstPath = tasks.projectLogoFile(project.id).path;
+    assert.equal(existsSync(firstPath), true);
+    tasks.uploadProjectLogo(project.id, png, "image/png", "user");
+    assert.equal(existsSync(firstPath), false);
+    assert.equal(readdirSync(join(database.dataDir, "project-logos")).length, 1);
+    assert.equal((tasks.exportData().projects as Array<{ logo: unknown }>)[0]?.logo !== null, true);
+    tasks.removeProjectLogo(project.id, "user");
+    assert.equal(tasks.listProjects()[0]?.logo, null);
+    assert.throws(() => tasks.projectLogoFile(project.id), /not found/);
+    assert.equal(readdirSync(join(database.dataDir, "project-logos")).length, 0);
+  } finally { database.close(); }
+});
+
+test("rejects unsafe project logo content and oversized files", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    assert.throws(() => tasks.uploadProjectLogo(project.id, Buffer.from("not an image"), "image/png", "user"), /PNG, JPEG, or WebP/);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+    assert.throws(() => tasks.uploadProjectLogo(project.id, jpeg, "image/png", "user"), /does not match/);
+    assert.throws(() => tasks.uploadProjectLogo(project.id, Buffer.alloc(256 * 1024 + 1), "image/png", "user"), /256 KB/);
   } finally { database.close(); }
 });

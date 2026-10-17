@@ -17,6 +17,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+async function uploadProjectLogo(id: string, file: File): Promise<{ project: Project }> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(id)}/logo`, {
+    method: "PUT", headers: { "content-type": file.type || "application/octet-stream" }, body: file,
+  });
+  const body = await response.json().catch(() => ({})) as { project?: Project; message?: string; error?: string };
+  if (!response.ok) throw new ApiError(body.message ?? "Logo upload failed", body.error ?? "request_failed", response.status);
+  return body as { project: Project };
+}
+
 export const api = {
   authState: () => request<{ authenticated: boolean; configured: boolean }>("/api/auth/state"),
   login: (password: string) => request<{ authenticated: boolean }>("/api/auth/login", {
@@ -36,6 +45,8 @@ export const api = {
     method: "POST", body: JSON.stringify({ archived }),
   }),
   deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+  uploadProjectLogo,
+  removeProjectLogo: (id: string) => request<{ project: Project }>(`/api/projects/${id}/logo`, { method: "DELETE" }),
   tasks: (tab: "backlog" | "todo" | "open" | "closed", projectId?: string) => request<{ tasks: TaskSummary[] }>(
     `/api/tasks?tab=${tab}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ""}`,
   ),

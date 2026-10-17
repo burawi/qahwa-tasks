@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { join } from "node:path";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
@@ -25,6 +25,8 @@ function booleanQuery(value: unknown): boolean {
 
 export async function buildApp(config: Config, database = new AppDatabase(config)): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 512 * 1024 });
+  app.addContentTypeParser(/^image\//, { parseAs: "buffer" }, (_request, body, done) => done(null, body));
+  app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_request, body, done) => done(null, body));
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
   const auth = new AuthService(database, config.sessionDays, config.publicBaseUrl.startsWith("https://"));
@@ -81,6 +83,9 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     if ((error as { code?: string }).code === "FST_ERR_CTP_INVALID_JSON_BODY") {
       return reply.code(400).send({ error: "invalid_json", message: "Invalid JSON body" });
     }
+    if ((error as { code?: string }).code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+      return reply.code(413).send({ error: "body_too_large", message: "Upload is too large" });
+    }
     app.log.error(error);
     return reply.code(500).send({ error: "internal_error", message: "Something went wrong" });
   });
@@ -119,6 +124,22 @@ function registerProjectRoutes(app: FastifyInstance, context: AppContext): void 
   app.patch<{ Params: { id: string }; Body: { name?: string; prefix?: string; rootDirectory?: string } }>(
     "/api/projects/:id", async (request) => ({ project: context.tasks.updateProject(request.params.id, request.body, "user") }),
   );
+  app.put<{ Params: { id: string }; Body: Buffer }>("/api/projects/:id/logo", async (request) => ({
+    project: context.tasks.uploadProjectLogo(
+      request.params.id,
+      Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0),
+      String(request.headers["content-type"] ?? "").split(";", 1)[0] ?? "",
+      "user",
+    ),
+  }));
+  app.get<{ Params: { id: string } }>("/api/projects/:id/logo", async (request, reply) => {
+    const logo = context.tasks.projectLogoFile(request.params.id);
+    if (!existsSync(logo.path)) throw new DomainError("Project logo not found", "project_logo_not_found", 404);
+    return reply.header("cache-control", "private, max-age=31536000, immutable").type(logo.mimeType).send(createReadStream(logo.path));
+  });
+  app.delete<{ Params: { id: string } }>("/api/projects/:id/logo", async (request) => ({
+    project: context.tasks.removeProjectLogo(request.params.id, "user"),
+  }));
   app.post<{ Params: { id: string }; Body: { archived: boolean } }>("/api/projects/:id/archive", async (request) => ({
     project: context.tasks.archiveProject(request.params.id, Boolean(request.body.archived), "user"),
   }));

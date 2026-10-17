@@ -5,6 +5,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import type { Project, TaskSummary } from "../domain/types";
 import { api, ApiError } from "./api";
 import { TaskCard } from "./components/TaskCard";
+import { ProjectLogo } from "./components/ProjectLogo";
 import { preferredCreateProjectId, readLastCreateProjectId, writeLastCreateProjectId } from "./project-preference";
 
 const CreateTask = lazy(() => import("./components/CreateTask").then((module) => ({ default: module.CreateTask })));
@@ -93,6 +94,7 @@ export function App() {
   if (!auth.authenticated) return <Login onSuccess={() => setAuth({ loading: false, authenticated: true, configured: true })} onError={fail} />;
 
   const activeProjects = projects.filter((project) => !project.archivedAt);
+  const selectedProject = activeProjects.find((project) => project.id === projectId);
   const initialCreateProjectId = preferredCreateProjectId(activeProjects, lastCreateProjectId, projectId);
   const openGroups = tab === "open" ? [
     { label: "In progress", items: tasks.filter((task) => task.status === "in_progress") },
@@ -103,9 +105,12 @@ export function App() {
     <header className="app-header">
       <div className="brand"><span>✓</span><div><strong>Qahwa Tasks</strong><small>{counts.open} open</small></div></div>
       <button type="button" className="icon-button" onClick={() => setShowProjects(true)} aria-label="Manage projects"><Settings2 /></button>
-      <select aria-label="Filter by project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-        <option value="">All projects</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-      </select>
+      <div className="project-filter">
+        {selectedProject && <ProjectLogo logo={selectedProject.logo} prefix={selectedProject.prefix} size="small" />}
+        <select aria-label="Filter by project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+          <option value="">All projects</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name} · {project.prefix}</option>)}
+        </select>
+      </div>
     </header>
     {offline && <div className="offline-banner"><WifiOff />Offline · showing the last loaded screen</div>}
     <main className="task-list">

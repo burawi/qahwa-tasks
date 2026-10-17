@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { chmodSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { assertDomain, DomainError } from "../domain/errors.js";
 import {
   documentFromPlainText,
@@ -11,6 +11,7 @@ import {
   type CommentKind,
   type HandoffInput,
   type Project,
+  type ProjectLogo,
   type RichTextDocument,
   type TaskComment,
   type TaskDetail,
@@ -22,11 +23,13 @@ import type { AppDatabase } from "./database.js";
 
 interface ProjectRow {
   id: string; name: string; prefix: string; root_directory: string; archived_at: string | null;
+  logo_filename: string | null; logo_mime_type: ProjectLogo["mimeType"] | null; logo_size: number | null; logo_updated_at: string | null;
   task_count: number; created_at: string; updated_at: string;
 }
 
 interface TaskRow {
   id: string; human_id: string; project_id: string; project_name: string; project_prefix: string;
+  project_logo_mime_type: ProjectLogo["mimeType"] | null; project_logo_size: number | null; project_logo_updated_at: string | null;
   root_directory: string; title: string; description_json: string; status: TaskStatus; outcome: TaskOutcome;
   rank: number; unresolved_comment_count: number; version: number; created_at: string; updated_at: string;
 }
@@ -70,6 +73,7 @@ function validateDocument(document: RichTextDocument): RichTextDocument {
 function projectFromRow(row: ProjectRow): Project {
   return {
     id: row.id, name: row.name, prefix: row.prefix, rootDirectory: row.root_directory, archivedAt: row.archived_at,
+    logo: logoFromValues(row.id, row.logo_mime_type, row.logo_size, row.logo_updated_at),
     taskCount: Number(row.task_count), createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
@@ -78,10 +82,23 @@ function taskFromRow(row: TaskRow): TaskSummary {
   return {
     id: row.id, humanId: row.human_id, projectId: row.project_id, projectName: row.project_name,
     projectPrefix: row.project_prefix, title: row.title, status: row.status, outcome: row.outcome,
+    projectLogo: logoFromValues(row.project_id, row.project_logo_mime_type, row.project_logo_size, row.project_logo_updated_at),
     rank: row.rank, unresolvedCommentCount: Number(row.unresolved_comment_count), version: row.version,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
+
+function logoFromValues(
+  projectId: string,
+  mimeType: ProjectLogo["mimeType"] | null,
+  size: number | null,
+  updatedAt: string | null,
+): ProjectLogo | null {
+  if (!mimeType || size === null || !updatedAt) return null;
+  return { mimeType, size, updatedAt, url: `/api/projects/${encodeURIComponent(projectId)}/logo?v=${encodeURIComponent(updatedAt)}` };
+}
+
+export const MAX_PROJECT_LOGO_BYTES = 256 * 1024;
 
 export class TaskService {
   constructor(private readonly database: AppDatabase) {}
@@ -143,7 +160,60 @@ export class TaskService {
     const project = this.getProject(id);
     assertDomain(project.taskCount === 0, "Only projects without tasks can be deleted", "project_has_tasks", 409);
     this.activity({ projectId: id, actor, eventType: "project.deleted", details: { name: project.name } });
+    const filename = this.logoFilename(id);
     this.database.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    this.removeLogoFile(filename);
+  }
+
+  uploadProjectLogo(id: string, bytes: Buffer, declaredMimeType: string, actor: Actor): Project {
+    this.getProject(id);
+    assertDomain(bytes.length > 0, "Logo file is empty", "empty_project_logo");
+    assertDomain(bytes.length <= MAX_PROJECT_LOGO_BYTES, "Logo must be 256 KB or smaller", "project_logo_too_large", 413);
+    const detected = this.detectLogo(bytes);
+    assertDomain(detected !== null, "Logo must be a PNG, JPEG, or WebP image", "invalid_project_logo_type");
+    assertDomain(declaredMimeType.toLowerCase() === detected.mimeType, "Logo content does not match its file type", "project_logo_type_mismatch");
+    const directory = this.logoDirectory();
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const filename = `${id}-${randomUUID()}.${detected.extension}`;
+    const temporary = join(directory, `.${filename}.tmp`);
+    const destination = join(directory, filename);
+    writeFileSync(temporary, bytes, { flag: "wx", mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    const previous = this.logoFilename(id);
+    try {
+      renameSync(temporary, destination);
+      const timestamp = now();
+      this.database.db.prepare(`
+        UPDATE projects SET logo_filename = ?, logo_mime_type = ?, logo_size = ?, logo_updated_at = ?, updated_at = ? WHERE id = ?
+      `).run(filename, detected.mimeType, bytes.length, timestamp, timestamp, id);
+    } catch (error) {
+      this.removeLogoFile(filename);
+      this.removeLogoFile(basename(temporary));
+      throw error;
+    }
+    this.removeLogoFile(previous);
+    this.activity({ projectId: id, actor, eventType: "project.logo_updated", details: { mimeType: detected.mimeType, size: bytes.length } });
+    return this.getProject(id);
+  }
+
+  removeProjectLogo(id: string, actor: Actor): Project {
+    this.getProject(id);
+    const filename = this.logoFilename(id);
+    this.database.db.prepare(`
+      UPDATE projects SET logo_filename = NULL, logo_mime_type = NULL, logo_size = NULL, logo_updated_at = NULL, updated_at = ? WHERE id = ?
+    `).run(now(), id);
+    this.removeLogoFile(filename);
+    this.activity({ projectId: id, actor, eventType: "project.logo_removed" });
+    return this.getProject(id);
+  }
+
+  projectLogoFile(id: string): { path: string; mimeType: ProjectLogo["mimeType"] } {
+    const row = this.database.db.prepare("SELECT logo_filename, logo_mime_type FROM projects WHERE id = ?").get(id) as
+      | { logo_filename: string | null; logo_mime_type: ProjectLogo["mimeType"] | null }
+      | undefined;
+    assertDomain(row, "Project not found", "project_not_found", 404);
+    assertDomain(row.logo_filename && row.logo_mime_type, "Project logo not found", "project_logo_not_found", 404);
+    return { path: this.safeLogoPath(row.logo_filename), mimeType: row.logo_mime_type };
   }
 
   createTask(input: CreateTaskInput, actor: Actor): TaskDetail {
@@ -400,8 +470,45 @@ export class TaskService {
 
   private taskSelect(): string {
     return `SELECT t.*, p.name AS project_name, p.prefix AS project_prefix, p.root_directory,
+      p.logo_mime_type AS project_logo_mime_type, p.logo_size AS project_logo_size,
+      p.logo_updated_at AS project_logo_updated_at,
       (SELECT COUNT(*) FROM comments c WHERE c.task_id = t.id AND c.parent_id IS NULL AND c.resolved_at IS NULL) AS unresolved_comment_count
       FROM tasks t JOIN projects p ON p.id = t.project_id`;
+  }
+
+  private logoDirectory(): string {
+    return join(this.database.dataDir, "project-logos");
+  }
+
+  private logoFilename(id: string): string | null {
+    const row = this.database.db.prepare("SELECT logo_filename FROM projects WHERE id = ?").get(id) as { logo_filename: string | null } | undefined;
+    return row?.logo_filename ?? null;
+  }
+
+  private safeLogoPath(filename: string): string {
+    assertDomain(basename(filename) === filename, "Invalid stored project logo", "invalid_project_logo", 500);
+    return join(this.logoDirectory(), filename);
+  }
+
+  private removeLogoFile(filename: string | null): void {
+    if (!filename) return;
+    try { unlinkSync(this.safeLogoPath(filename)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  private detectLogo(bytes: Buffer): { mimeType: ProjectLogo["mimeType"]; extension: string } | null {
+    if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      return { mimeType: "image/png", extension: "png" };
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return { mimeType: "image/jpeg", extension: "jpg" };
+    }
+    if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
+      return { mimeType: "image/webp", extension: "webp" };
+    }
+    return null;
   }
 
   private commentsForTask(taskId: string, includeResolved: boolean): TaskComment[] {

@@ -107,9 +107,11 @@ ON notification_outbox(status, next_attempt_at);
 export class AppDatabase {
   readonly db: Database.Database;
   readonly path: string;
+  readonly dataDir: string;
 
   constructor(config: Config, explicitPath?: string) {
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+    this.dataDir = config.dataDir;
     this.path = explicitPath ?? join(config.dataDir, "qahwa-tasks.sqlite");
     this.db = new Database(this.path);
     chmodSync(this.path, 0o600);
@@ -117,6 +119,20 @@ export class AppDatabase {
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("busy_timeout = 5000");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  private migrate(): void {
+    const columns = new Set((this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((row) => row.name));
+    const additions = [
+      ["logo_filename", "TEXT"],
+      ["logo_mime_type", "TEXT"],
+      ["logo_size", "INTEGER"],
+      ["logo_updated_at", "TEXT"],
+    ] as const;
+    for (const [name, type] of additions) {
+      if (!columns.has(name)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
+    }
   }
 
   setting(key: string): string | null {

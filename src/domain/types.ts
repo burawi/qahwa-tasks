@@ -22,10 +22,18 @@ export interface Project {
   name: string;
   prefix: string;
   rootDirectory: string;
+  logo: ProjectLogo | null;
   archivedAt: string | null;
   taskCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProjectLogo {
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  size: number;
+  updatedAt: string;
+  url: string;
 }
 
 export interface TaskSummary {
@@ -34,6 +42,7 @@ export interface TaskSummary {
   projectId: string;
   projectName: string;
   projectPrefix: string;
+  projectLogo: ProjectLogo | null;
   title: string;
   status: TaskStatus;
   outcome: TaskOutcome;

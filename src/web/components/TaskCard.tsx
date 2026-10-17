@@ -3,6 +3,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, MessageCircle } from "lucide-react";
 import type { TaskSummary } from "../../domain/types";
 import { projectColorStyle } from "../project-color";
+import { ProjectLogo } from "./ProjectLogo";
 
 export function TaskCard({ task, draggable, onOpen }: { task: TaskSummary; draggable: boolean; onOpen: () => void }) {
   const sortable = useSortable({ id: task.id, disabled: !draggable });
@@ -24,7 +25,7 @@ export function TaskCard({ task, draggable, onOpen }: { task: TaskSummary; dragg
       <span className="task-id">{task.humanId}</span>
       <strong>{task.title}</strong>
       <span className="task-meta">
-        <span className="project-label"><span className="project-dot" />{task.projectName}</span>
+        <span className="project-label"><ProjectLogo logo={task.projectLogo} prefix={task.projectPrefix} size="small" />{task.projectName}</span>
         {task.unresolvedCommentCount > 0 && <span className="comment-count"><MessageCircle />{task.unresolvedCommentCount}</span>}
         {task.status === "closed" && <span className={`outcome ${task.outcome}`}>{task.outcome}</span>}
       </span>
