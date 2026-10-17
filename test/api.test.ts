@@ -33,6 +33,15 @@ test("requires authentication and issues a persistent secure session", async () 
     const token = String(cookie).split(";", 1)[0];
     const allowed = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie: token } });
     assert.equal(allowed.statusCode, 200);
+    const deniedDiagnostic = await app.inject({
+      method: "POST", url: "/api/client-diagnostics", payload: { category: "bootstrap-timeout" },
+    });
+    assert.equal(deniedDiagnostic.statusCode, 401);
+    const diagnostic = await app.inject({
+      method: "POST", url: "/api/client-diagnostics", headers: { cookie: token },
+      payload: { category: "bootstrap-timeout", message: "test diagnostic", path: "/" },
+    });
+    assert.equal(diagnostic.statusCode, 204);
   } finally { await app.close(); }
 });
 

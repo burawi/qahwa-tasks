@@ -45,7 +45,7 @@ export async function buildApp(config: Config, database = new AppDatabase(config
       : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; media-src 'self' https: http:; frame-src 'self' https: http:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     if (config.publicBaseUrl.startsWith("https://")) reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
     const pathname = request.url.split("?", 1)[0] ?? request.url;
-    if (request.url.startsWith("/api/") || pathname === "/sw.js" || pathname === "/manifest.webmanifest") {
+    if (request.url.startsWith("/api/") || pathname === "/sw.js" || pathname === "/boot.js" || pathname === "/manifest.webmanifest") {
       reply.header("cache-control", "no-store");
     } else if (pathname.startsWith("/assets/") && reply.statusCode < 400 && !reply.getHeader("cache-control")) {
       reply.header("cache-control", "public, max-age=31536000, immutable");
@@ -74,6 +74,20 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     if (!request.url.startsWith("/api/") || request.url.startsWith("/api/auth/login") || request.url.startsWith("/api/auth/setup") || request.url.startsWith("/api/auth/state")) return;
     auth.requireSession(request, reply);
     if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) validateOrigin(request, config.publicBaseUrl);
+  });
+
+  app.post<{ Body: { category?: unknown; message?: unknown; path?: unknown } }>("/api/client-diagnostics", {
+    config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+  }, async (request, reply) => {
+    const text = (value: unknown, maximum: number) => typeof value === "string" ? value.slice(0, maximum) : "";
+    request.log.warn({
+      clientDiagnostic: {
+        category: text(request.body?.category, 80),
+        message: text(request.body?.message, 500),
+        path: text(request.body?.path, 200),
+      },
+    }, "client bootstrap diagnostic");
+    return reply.code(204).send();
   });
 
   registerAuthRoutes(app, context);

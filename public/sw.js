@@ -1,4 +1,4 @@
-const CACHE = "qahwa-tasks-v4";
+const CACHE = "qahwa-tasks-v5";
 const STATIC_ASSETS = ["/manifest.webmanifest", "/icons/icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -14,7 +14,15 @@ self.addEventListener("activate", (event) => {
     await self.clients.claim();
     if (legacyCaches.length > 0) {
       const clients = await self.clients.matchAll({ type: "window" });
-      await Promise.all(clients.map((client) => client.navigate(client.url)));
+      clients.forEach((client) => {
+        const recoveryUrl = new URL(client.url);
+        if (recoveryUrl.searchParams.get("recovery") === "v5") return;
+        recoveryUrl.searchParams.set("recovery", "v5");
+        recoveryUrl.searchParams.set("updated", Date.now().toString());
+        // Do not await this promise inside activate. A controlled navigation can
+        // wait for activation to finish, which would deadlock the cache purge.
+        void client.navigate(recoveryUrl.toString()).catch(() => {});
+      });
     }
   })());
 });
