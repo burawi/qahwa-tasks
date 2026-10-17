@@ -11,6 +11,7 @@
   --accent: #b65f33;
   --accent-strong: #914421;
   --accent-soft: #f5e1d5;
+  --caret: #914421;
   --green: #497359;
   --green-soft: #dceadd;
   --blue: #47718a;
@@ -35,6 +36,7 @@
     --accent: #df8250;
     --accent-strong: #f49a65;
     --accent-soft: #4a3023;
+    --caret: #f49a65;
     --green: #8bc09a;
     --green-soft: #24392a;
     --blue: #8dbbd0;
@@ -138,6 +140,7 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .editor-shell { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); }
 .editor-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 17%, transparent); }
 .rich-input { min-height: 190px; padding: 12px 13px; color: var(--text); font-size: 15px; font-weight: 450; outline: none; }
+.rich-input:focus { caret-color: var(--caret); }
 .rich-input.compact { min-height: 90px; }
 .rich-input:empty::before { content: attr(data-placeholder); color: var(--muted); pointer-events: none; }
 .format-bar { min-height: 43px; padding: 5px 7px; display: flex; align-items: center; gap: 3px; border-top: 1px solid var(--line); background: var(--surface); }
