@@ -22,6 +22,17 @@ Use the `qahwa-tasks` MCP tools as the authoritative task interface. Do not writ
 - Do not invent commitments that were not agreed during the discussion.
 - New tasks belong at the bottom; the user controls priority through ordering.
 
+### Elaborate tasks from repository evidence
+
+Before substantially expanding an existing note or rewriting it into a detailed task:
+
+1. Load the current task with `get_task` and use its returned project `rootDirectory`. Keep the task version and unresolved comments current before calling `update_task`.
+2. Read every applicable `AGENTS.md` from the project root through the relevant implementation directories.
+3. Research the repository read-only with focused searches for the named feature. Inspect the relevant implementation surfaces and, when they affect the task, the current data model or contracts, UI flow, tests, and deployment or integration boundaries.
+4. Stop researching once there is enough evidence to describe an accurate scope. Do not edit code, run mutating commands, change configuration or data, or turn elaboration into implementation.
+5. Preserve the user's stated intent and scope. Ground confirmed details in the components and constraints actually found, keep unresolved product or technical decisions visibly unresolved, and do not invent requirements, solutions, or commitments.
+6. Update only the task record with `update_task` and its current version. If the version changed, reload the task and reconcile the user's newer edits before retrying.
+
 ## Perform tasks
 
 1. A task must pass through `backlog -> todo -> in_progress`; never start directly from Backlog.
