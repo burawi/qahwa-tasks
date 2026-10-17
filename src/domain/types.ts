@@ -69,10 +69,25 @@ export interface TaskComment {
   replies: TaskComment[];
 }
 
+export interface TaskOutput {
+  id: string;
+  taskId: string;
+  summary: string;
+  validation: string[];
+  commit: string | null;
+  limitations: string[];
+  sessionId: string | null;
+  runId: string | null;
+  artifacts: string[];
+  sourceCommentId: string | null;
+  createdAt: string;
+}
+
 export interface TaskDetail extends TaskSummary {
   rootDirectory: string;
   description: RichTextDocument;
   comments: TaskComment[];
+  outputs: TaskOutput[];
   latestHandoff: TaskComment | null;
 }
 
@@ -83,6 +98,7 @@ export interface HandoffInput {
   validation?: string[];
   commit?: string;
   limitations?: string[];
+  artifacts?: string[];
 }
 
 export const emptyDocument = (): RichTextDocument => ({ type: "doc", content: [{ type: "paragraph" }] });

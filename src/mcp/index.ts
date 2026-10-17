@@ -25,11 +25,15 @@ const compactTask = (task: ReturnType<TaskService["getTask"]>) => ({
   outcome: task.outcome,
   version: task.version,
   description: plainTextFromDocument(task.description),
-  unresolvedComments: task.comments.filter((comment) => !comment.resolvedAt).map((comment) => ({
+  unresolvedComments: task.comments.filter((comment) => comment.kind === "comment" && !comment.resolvedAt).map((comment) => ({
     id: comment.id,
     author: comment.author,
     text: comment.plainText,
     replies: comment.replies.map((reply) => ({ id: reply.id, author: reply.author, text: reply.plainText })),
+  })),
+  outputs: task.outputs.map((output) => ({
+    createdAt: output.createdAt, summary: output.summary, validation: output.validation, commit: output.commit,
+    limitations: output.limitations, sessionId: output.sessionId, runId: output.runId, artifacts: output.artifacts,
   })),
   latestHandoff: task.latestHandoff ? { text: task.latestHandoff.plainText, metadata: task.latestHandoff.metadata } : null,
 });
@@ -61,7 +65,7 @@ server.registerTool("list_tasks", {
 });
 
 server.registerTool("get_task", {
-  description: "Load one task with its current description, unresolved comments, latest handoff and project root. Resolved history is omitted by default to protect context.",
+  description: "Load one task with its current description, structured outputs, unresolved comments, legacy latest handoff and project root. Resolved history is omitted by default to protect context.",
   inputSchema: { taskId: z.string(), includeResolvedHistory: z.boolean().optional() },
   annotations: { readOnlyHint: true },
 }, ({ taskId, includeResolvedHistory }) => text(compactTask(tasks.getTask(taskId, includeResolvedHistory ?? false))));
@@ -129,14 +133,15 @@ server.registerTool("resolve_comment", {
 )));
 
 server.registerTool("submit_for_review", {
-  description: "Add a compact Codex handoff and move an in-progress task to in-review. This queues a Qahwa Notify alert.",
+  description: "Append a structured Codex output and move an in-progress task to in-review. This queues a Qahwa Notify alert.",
   inputSchema: {
     taskId: z.string(), sessionId: z.string().optional(), runId: z.string().optional(), summary: z.string().min(1),
     validation: z.array(z.string()).optional(), commit: z.string().optional(), limitations: z.array(z.string()).optional(),
+    artifacts: z.array(z.string()).optional(),
   },
-}, async ({ taskId, sessionId, runId, summary, validation, commit, limitations }) => {
+}, async ({ taskId, sessionId, runId, summary, validation, commit, limitations, artifacts }) => {
   const result = tasks.submitForReview(taskId, {
-    sessionId: sessionId ?? process.env.CODEX_THREAD_ID, runId, summary, validation, commit, limitations,
+    sessionId: sessionId ?? process.env.CODEX_THREAD_ID, runId, summary, validation, commit, limitations, artifacts,
   }, "codex");
   await notifications.process();
   return text(compactTask(result));

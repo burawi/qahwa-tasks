@@ -45,7 +45,12 @@ test("enforces the agreed workflow and explicit Codex closure", () => {
     tasks.transition(task.id, { to: "in_progress" }, "codex");
     assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM notification_outbox WHERE event_type = 'started'").get().count, 1);
     tasks.submitForReview(task.id, { sessionId: "session-1", summary: "Implemented", validation: ["Tests passed"] }, "codex");
-    assert.equal(tasks.getTask(task.id).status, "in_review");
+    const reviewed = tasks.getTask(task.id);
+    assert.equal(reviewed.status, "in_review");
+    assert.equal(reviewed.outputs[0]?.summary, "Implemented");
+    assert.deepEqual(reviewed.outputs[0]?.validation, ["Tests passed"]);
+    assert.equal(reviewed.outputs[0]?.sessionId, "session-1");
+    assert.equal(reviewed.comments.length, 0);
     assert.throws(() => tasks.transition(task.id, { to: "closed", outcome: "completed" }, "codex"), /explicit user instruction/);
     const closed = tasks.transition(task.id, {
       to: "closed", outcome: "completed", explicitUserInstruction: "Close WAS-0001 as completed",
@@ -75,9 +80,56 @@ test("only Codex returns review feedback to in-progress and keeps threaded comme
     tasks.resolveComment(root.id, true, "codex", documentFromPlainText("Spacing adjusted"));
     const task = tasks.getTask(created.id);
     assert.equal(task.status, "in_progress");
-    assert.equal(task.comments[1]?.resolvedAt === null, false);
-    assert.equal(task.comments[1]?.replies[0]?.plainText, "Spacing adjusted");
+    assert.equal(task.comments[0]?.resolvedAt === null, false);
+    assert.equal(task.comments[0]?.replies[0]?.plainText, "Spacing adjusted");
   } finally { database.close(); }
+});
+
+test("appends structured outputs chronologically with complete provenance", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    const created = tasks.createTask({ projectId: project.id, title: "Outputs", status: "todo" }, "codex");
+    tasks.transition(created.id, { to: "in_progress" }, "codex");
+    tasks.submitForReview(created.id, {
+      sessionId: "session-1", runId: "run-1", summary: "First pass", validation: ["Unit tests"],
+      commit: "abc123", limitations: ["No browser QA"], artifacts: ["dist/report.json"],
+    }, "codex");
+    tasks.transition(created.id, { to: "in_progress" }, "codex");
+    tasks.submitForReview(created.id, { sessionId: "session-2", summary: "Revision" }, "codex");
+    const outputs = tasks.getTask(created.id).outputs;
+    assert.equal(outputs.length, 2);
+    assert.equal(outputs[0]?.summary, "First pass");
+    assert.equal(outputs[0]?.commit, "abc123");
+    assert.deepEqual(outputs[0]?.limitations, ["No browser QA"]);
+    assert.deepEqual(outputs[0]?.artifacts, ["dist/report.json"]);
+    assert.equal(outputs[1]?.summary, "Revision");
+    assert.notEqual(outputs[0]?.id, outputs[1]?.id);
+  } finally { database.close(); }
+});
+
+test("migrates legacy handoff comments into structured outputs without removing history", () => {
+  const { database, tasks, project } = fixture();
+  const created = tasks.createTask({ projectId: project.id, title: "Legacy", status: "todo" }, "codex");
+  tasks.addComment(created.id, {
+    body: documentFromPlainText("Completed: Legacy work"), kind: "handoff",
+    metadata: { summary: "Legacy work", validation: ["Legacy tests"], sessionId: "old-session" },
+  }, "codex");
+  const config = database.path;
+  const dataDir = database.dataDir;
+  database.close();
+  const reopened = new AppDatabase({
+    host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
+    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
+    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+  }, config);
+  try {
+    const migrated = new TaskService(reopened).getTask(created.id);
+    assert.equal(migrated.outputs.length, 1);
+    assert.equal(migrated.outputs[0]?.summary, "Legacy work");
+    assert.deepEqual(migrated.outputs[0]?.validation, ["Legacy tests"]);
+    assert.equal(migrated.outputs[0]?.sourceCommentId, migrated.comments[0]?.id);
+    assert.equal(migrated.latestHandoff?.plainText, "Completed: Legacy work");
+  } finally { reopened.close(); }
 });
 
 test("deletes only Backlog tasks and only empty projects", () => {

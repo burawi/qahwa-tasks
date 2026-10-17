@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ChevronDown, ChevronRight, History, MessageCircle, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, FileOutput, History, MessageCircle, Pencil, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { documentFromPlainText, emptyDocument, type RichTextDocument, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
 import { api } from "../api";
@@ -42,8 +42,9 @@ export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
 
   if (!task) return <div className="detail-page"><div className="detail-loading">Loading task…</div></div>;
   const actions = statusActions(task.status);
-  const unresolved = task.comments.filter((item) => !item.resolvedAt);
-  const resolved = task.comments.filter((item) => item.resolvedAt);
+  const discussions = task.comments.filter((item) => item.kind === "comment");
+  const unresolved = discussions.filter((item) => !item.resolvedAt);
+  const resolved = discussions.filter((item) => item.resolvedAt);
 
   const save = () => run(async () => {
     await api.updateTask(task.id, { title, description, expectedVersion: task.version });
@@ -85,6 +86,19 @@ export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
         </div>
       </section>
 
+      <section className="output-section">
+        <h2><FileOutput />Output <span>{task.outputs.length}</span></h2>
+        {task.outputs.length === 0 && <p className="empty-note">No work output has been submitted yet.</p>}
+        {task.outputs.map((output) => <article className="output-card" key={output.id}>
+          <header><strong>{output.summary}</strong><time>{formatDate(output.createdAt)}</time></header>
+          {output.validation.length > 0 && <OutputList label="Validation" items={output.validation} />}
+          {output.commit && <p><b>Commit</b><code>{output.commit}</code></p>}
+          {output.limitations.length > 0 && <OutputList label="Limitations" items={output.limitations} />}
+          {output.artifacts.length > 0 && <div><b>Artifacts</b><ul>{output.artifacts.map((artifact) => <li key={artifact}>{artifactLink(artifact)}</li>)}</ul></div>}
+          {(output.sessionId || output.runId) && <footer>{output.sessionId && <code>Session {output.sessionId}</code>}{output.runId && <code>Run {output.runId}</code>}</footer>}
+        </article>)}
+      </section>
+
       <section className="comments-section">
         <h2><MessageCircle />Comments <span>{unresolved.length}</span></h2>
         {unresolved.length === 0 && <p className="empty-note">No open comment threads.</p>}
@@ -102,6 +116,15 @@ export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
       </section>
     </main>
   </div>;
+}
+
+function OutputList({ label, items }: { label: string; items: string[] }) {
+  return <div><b>{label}</b><ul>{items.map((item) => <li key={item}>{item}</li>)}</ul></div>;
+}
+
+function artifactLink(value: string) {
+  if (/^https?:\/\//i.test(value)) return <a href={value} target="_blank" rel="noreferrer">{value}</a>;
+  return <code>{value}</code>;
 }
 
 function CommentThread({ thread, taskId, onChanged, onError }: { thread: TaskComment; taskId: string; onChanged: () => Promise<void>; onError: (message: string) => void }) {

@@ -56,6 +56,22 @@ CREATE TABLE IF NOT EXISTS comments (
 
 CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id, created_at);
 
+CREATE TABLE IF NOT EXISTS task_outputs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  summary TEXT NOT NULL,
+  validation_json TEXT NOT NULL DEFAULT '[]',
+  commit_hash TEXT,
+  limitations_json TEXT NOT NULL DEFAULT '[]',
+  session_id TEXT,
+  run_id TEXT,
+  artifacts_json TEXT NOT NULL DEFAULT '[]',
+  source_comment_id TEXT UNIQUE REFERENCES comments(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_outputs_task ON task_outputs(task_id, created_at);
+
 CREATE TABLE IF NOT EXISTS task_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -133,6 +149,49 @@ export class AppDatabase {
     for (const [name, type] of additions) {
       if (!columns.has(name)) this.db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${type}`);
     }
+    this.migrateHandoffComments();
+  }
+
+  private migrateHandoffComments(): void {
+    const rows = this.db.prepare(`
+      SELECT id, task_id, plain_text, metadata_json, created_at FROM comments
+      WHERE kind = 'handoff' AND id NOT IN (
+        SELECT source_comment_id FROM task_outputs WHERE source_comment_id IS NOT NULL
+      ) ORDER BY created_at
+    `).all() as Array<{
+      id: string; task_id: string; plain_text: string; metadata_json: string | null; created_at: string;
+    }>;
+    const insert = this.db.prepare(`
+      INSERT INTO task_outputs
+      (id, task_id, summary, validation_json, commit_hash, limitations_json, session_id, run_id, artifacts_json, source_comment_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const migrate = this.db.transaction(() => {
+      for (const row of rows) {
+        const metadata = this.parseHandoffMetadata(row.metadata_json);
+        insert.run(
+          row.id, row.task_id, this.metadataString(metadata.summary) ?? row.plain_text,
+          JSON.stringify(this.metadataList(metadata.validation)), this.metadataString(metadata.commit),
+          JSON.stringify(this.metadataList(metadata.limitations)), this.metadataString(metadata.sessionId),
+          this.metadataString(metadata.runId), JSON.stringify(this.metadataList(metadata.artifacts)), row.id, row.created_at,
+        );
+      }
+    });
+    migrate();
+  }
+
+  private parseHandoffMetadata(value: string | null): Record<string, unknown> {
+    if (!value) return {};
+    try { return JSON.parse(value) as Record<string, unknown>; }
+    catch { return {}; }
+  }
+
+  private metadataString(value: unknown): string | null {
+    return typeof value === "string" && value.trim() ? value : null;
+  }
+
+  private metadataList(value: unknown): string[] {
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   }
 
   setting(key: string): string | null {

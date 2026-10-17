@@ -83,6 +83,10 @@ test("web API records review feedback but cannot return a task to work", async (
       method: "POST", url: "/api/auth/login", payload: { password: "correct horse battery staple" },
     });
     const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+    const detail = await app.inject({ method: "GET", url: `/api/tasks/${created.id}`, headers: { cookie } });
+    assert.equal(detail.statusCode, 200);
+    assert.equal(detail.json().task.outputs[0].summary, "Ready");
+    assert.equal(detail.json().task.comments.length, 0);
     const feedback = await app.inject({
       method: "POST", url: `/api/tasks/${created.id}/comments`, headers: { cookie },
       payload: { body: documentFromPlainText("Please adjust spacing") },

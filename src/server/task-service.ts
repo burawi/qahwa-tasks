@@ -3,7 +3,6 @@ import { chmodSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync }
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { assertDomain, DomainError } from "../domain/errors.js";
 import {
-  documentFromPlainText,
   documentFromSections,
   emptyDocument,
   plainTextFromDocument,
@@ -16,6 +15,7 @@ import {
   type TaskComment,
   type TaskDetail,
   type TaskOutcome,
+  type TaskOutput,
   type TaskStatus,
   type TaskSummary,
 } from "../domain/types.js";
@@ -38,6 +38,12 @@ interface CommentRow {
   id: string; task_id: string; parent_id: string | null; author: Actor; kind: CommentKind; body_json: string;
   plain_text: string; requires_response: number; resolved_at: string | null; metadata_json: string | null;
   created_at: string; updated_at: string;
+}
+
+interface OutputRow {
+  id: string; task_id: string; summary: string; validation_json: string; commit_hash: string | null;
+  limitations_json: string; session_id: string | null; run_id: string | null; artifacts_json: string;
+  source_comment_id: string | null; created_at: string;
 }
 
 export interface CreateTaskInput {
@@ -263,6 +269,7 @@ export class TaskService {
     const comments = this.commentsForTask(row.id, includeResolved);
     return {
       ...taskFromRow(row), rootDirectory: row.root_directory, description: parseDocument(row.description_json), comments,
+      outputs: this.outputsForTask(row.id),
       latestHandoff: [...comments].reverse().find((comment) => comment.kind === "handoff") ?? null,
     };
   }
@@ -393,18 +400,30 @@ export class TaskService {
   submitForReview(id: string, handoff: HandoffInput, actor: "codex"): TaskDetail {
     const task = this.getTask(id);
     assertDomain(task.status === "in_progress", "Only in-progress tasks can be submitted", "invalid_transition", 409);
-    const blocks = [
-      `Completed: ${handoff.summary}`,
-      handoff.validation?.length ? `Validation:\n${handoff.validation.map((item) => `• ${item}`).join("\n")}` : "",
-      handoff.commit ? `Commit: ${handoff.commit}` : "",
-      handoff.limitations?.length ? `Limitations:\n${handoff.limitations.map((item) => `• ${item}`).join("\n")}` : "",
-    ].filter(Boolean);
-    this.addComment(task.id, {
-      body: documentFromPlainText(blocks.join("\n\n")),
-      kind: "handoff",
-      metadata: { sessionId: handoff.sessionId, runId: handoff.runId ?? randomUUID(), ...handoff },
-    }, actor);
+    this.addOutput(task.id, { ...handoff, runId: handoff.runId ?? randomUUID() }, actor);
     return this.transition(task.id, { to: "in_review" }, actor);
+  }
+
+  addOutput(taskId: string, input: HandoffInput, actor: "codex"): TaskOutput {
+    const task = this.getTask(taskId);
+    const summary = input.summary.trim();
+    assertDomain(summary.length > 0 && summary.length <= 10_000, "Output summary must be 1–10,000 characters", "invalid_output");
+    const validation = this.outputList(input.validation);
+    const limitations = this.outputList(input.limitations);
+    const artifacts = this.outputList(input.artifacts);
+    const id = randomUUID();
+    const createdAt = now();
+    this.database.db.prepare(`
+      INSERT INTO task_outputs
+      (id, task_id, summary, validation_json, commit_hash, limitations_json, session_id, run_id, artifacts_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, task.id, summary, JSON.stringify(validation), input.commit?.trim() || null,
+      JSON.stringify(limitations), input.sessionId?.trim() || null, input.runId?.trim() || null,
+      JSON.stringify(artifacts), createdAt,
+    );
+    this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "output.created", details: { outputId: id } });
+    return this.outputById(id);
   }
 
   activityForTask(id: string, limit = 50): unknown[] {
@@ -420,7 +439,7 @@ export class TaskService {
 
   exportData(): Record<string, unknown> {
     return {
-      exportedAt: now(), version: 1, projects: this.listProjects(true),
+      exportedAt: now(), version: 2, projects: this.listProjects(true),
       tasks: (this.database.db.prepare("SELECT human_id FROM tasks ORDER BY created_at").all() as Array<{ human_id: string }>).map(
         (row) => this.getTask(row.human_id, true),
       ),
@@ -472,7 +491,7 @@ export class TaskService {
     return `SELECT t.*, p.name AS project_name, p.prefix AS project_prefix, p.root_directory,
       p.logo_mime_type AS project_logo_mime_type, p.logo_size AS project_logo_size,
       p.logo_updated_at AS project_logo_updated_at,
-      (SELECT COUNT(*) FROM comments c WHERE c.task_id = t.id AND c.parent_id IS NULL AND c.resolved_at IS NULL) AS unresolved_comment_count
+      (SELECT COUNT(*) FROM comments c WHERE c.task_id = t.id AND c.kind = 'comment' AND c.parent_id IS NULL AND c.resolved_at IS NULL) AS unresolved_comment_count
       FROM tasks t JOIN projects p ON p.id = t.project_id`;
   }
 
@@ -524,6 +543,33 @@ export class TaskService {
       else if (!row.parent_id) roots.push(comment);
     }
     return roots;
+  }
+
+  private outputsForTask(taskId: string): TaskOutput[] {
+    const rows = this.database.db.prepare("SELECT * FROM task_outputs WHERE task_id = ? ORDER BY created_at, rowid")
+      .all(taskId) as OutputRow[];
+    return rows.map((row) => this.outputFromRow(row));
+  }
+
+  private outputById(id: string): TaskOutput {
+    const row = this.database.db.prepare("SELECT * FROM task_outputs WHERE id = ?").get(id) as OutputRow | undefined;
+    assertDomain(row, "Output not found", "output_not_found", 404);
+    return this.outputFromRow(row);
+  }
+
+  private outputFromRow(row: OutputRow): TaskOutput {
+    return {
+      id: row.id, taskId: row.task_id, summary: row.summary,
+      validation: JSON.parse(row.validation_json) as string[], commit: row.commit_hash,
+      limitations: JSON.parse(row.limitations_json) as string[], sessionId: row.session_id, runId: row.run_id,
+      artifacts: JSON.parse(row.artifacts_json) as string[], sourceCommentId: row.source_comment_id, createdAt: row.created_at,
+    };
+  }
+
+  private outputList(values: string[] | undefined): string[] {
+    const result = (values ?? []).map((value) => value.trim()).filter(Boolean);
+    assertDomain(result.length <= 100 && result.every((value) => value.length <= 2_000), "Output lists are too long", "invalid_output");
+    return result;
   }
 
   private commentFromRow(row: CommentRow): TaskComment {

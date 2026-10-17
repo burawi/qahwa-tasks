@@ -23,7 +23,9 @@ test("MCP return-to-work adapter preserves the Codex-only review transition", ()
     const project = tasks.createProject({ name: "MCP Review", prefix: "MCP", rootDirectory: root }, "codex");
     const created = tasks.createTask({ projectId: project.id, title: "Return task", status: "todo" }, "codex");
     tasks.transition(created.id, { to: "in_progress" }, "codex");
-    tasks.submitForReview(created.id, { summary: "Ready" }, "codex");
+    tasks.submitForReview(created.id, { summary: "Ready", artifacts: ["report.txt"] }, "codex");
+    assert.equal(tasks.getTask(created.id).outputs[0]?.summary, "Ready");
+    assert.deepEqual(tasks.getTask(created.id).outputs[0]?.artifacts, ["report.txt"]);
     assert.equal(returnTaskToWork(tasks, created.id).status, "in_progress");
   } finally { database.close(); }
 });
