@@ -130,14 +130,11 @@ function CommentBubble({ comment, reply = false }: { comment: TaskComment; reply
   </div>;
 }
 
-function statusActions(status: TaskStatus): Array<{ label: string; to: TaskStatus; outcome?: "completed"; kind?: string }> {
+export function statusActions(status: TaskStatus): Array<{ label: string; to: TaskStatus; outcome?: "completed"; kind?: string }> {
   if (status === "backlog") return [{ label: "Move to Todo", to: "todo", kind: "primary" }];
   if (status === "todo") return [{ label: "Start work", to: "in_progress", kind: "primary" }];
   if (status === "in_progress") return [{ label: "Submit for review", to: "in_review", kind: "primary" }];
-  if (status === "in_review") return [
-    { label: "Request changes", to: "in_progress" },
-    { label: "Mark completed", to: "closed", outcome: "completed", kind: "primary" },
-  ];
+  if (status === "in_review") return [{ label: "Mark completed", to: "closed", outcome: "completed", kind: "primary" }];
   return [];
 }
 

@@ -7,6 +7,7 @@ import { AppDatabase } from "../server/database.js";
 import { NotificationWorker } from "../server/notification-worker.js";
 import { QahwaNotifier } from "../server/notifier.js";
 import { TaskService } from "../server/task-service.js";
+import { returnTaskToWork } from "./workflow.js";
 
 const config = loadConfig();
 const database = new AppDatabase(config);
@@ -144,7 +145,7 @@ server.registerTool("submit_for_review", {
 server.registerTool("return_to_work", {
   description: "Move a task from in-review back to in-progress when review feedback requires changes.",
   inputSchema: { taskId: z.string() },
-}, ({ taskId }) => text(compactTask(tasks.transition(taskId, { to: "in_progress" }, "codex"))));
+}, ({ taskId }) => text(compactTask(returnTaskToWork(tasks, taskId))));
 
 server.registerTool("close_task", {
   description: "Close a task only after the user explicitly instructs Codex to complete or cancel this specific task. Never infer permission.",

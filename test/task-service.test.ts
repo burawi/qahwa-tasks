@@ -55,14 +55,23 @@ test("enforces the agreed workflow and explicit Codex closure", () => {
   } finally { database.close(); }
 });
 
-test("returns review feedback to in-progress and keeps threaded comments", () => {
+test("only Codex returns review feedback to in-progress and keeps threaded comments", () => {
   const { database, tasks, project } = fixture();
   try {
     const created = tasks.createTask({ projectId: project.id, title: "Comments", status: "todo" }, "user");
     tasks.transition(created.id, { to: "in_progress" }, "codex");
     tasks.submitForReview(created.id, { summary: "First pass" }, "codex");
-    tasks.transition(created.id, { to: "in_progress" }, "user");
     const root = tasks.addComment(created.id, { body: documentFromPlainText("Please adjust spacing") }, "user");
+    assert.equal(tasks.getTask(created.id).status, "in_review");
+    assert.throws(
+      () => tasks.transition(created.id, { to: "in_progress" }, "user"),
+      /Only Codex can return an in-review task to work/,
+    );
+    assert.throws(
+      () => tasks.transition(created.id, { to: "in_progress" }, "system"),
+      /Only Codex can return an in-review task to work/,
+    );
+    tasks.transition(created.id, { to: "in_progress" }, "codex");
     tasks.resolveComment(root.id, true, "codex", documentFromPlainText("Spacing adjusted"));
     const task = tasks.getTask(created.id);
     assert.equal(task.status, "in_progress");

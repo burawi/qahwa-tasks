@@ -219,6 +219,12 @@ export class TaskService {
   ): TaskDetail {
     const task = this.getTask(id);
     assertDomain(TRANSITIONS[task.status].includes(input.to), `Cannot move ${task.status} to ${input.to}`, "invalid_transition", 409);
+    assertDomain(
+      !(task.status === "in_review" && input.to === "in_progress") || actor === "codex",
+      "Only Codex can return an in-review task to work",
+      "invalid_transition",
+      409,
+    );
     const outcome = input.to === "closed" ? input.outcome : null;
     if (input.to === "closed") {
       assertDomain(outcome === "completed" || outcome === "cancelled", "Closed tasks need an outcome", "outcome_required");
