@@ -80,7 +80,9 @@
   window.addEventListener("error", function (event) {
     var target = event.target;
     if (target && target !== window && target.tagName) {
-      if (target.tagName === "SCRIPT") fail("script-load-error", target.src);
+      if (target.tagName === "SCRIPT" && new URL(target.src, location.href).origin === location.origin) {
+        fail("script-load-error", target.src);
+      }
       return;
     }
     fail("window-error", event.error || event.message);

@@ -53,6 +53,7 @@ test("pre-bundle guard recovers once and makes bootstrap failures visible", () =
   assert.match(source, /showRecovery/);
   assert.match(source, /bootstrap-timeout/);
   assert.match(source, /target\.tagName === "SCRIPT"/);
+  assert.match(source, /\.origin === location\.origin/);
 });
 
 test("unknown historical script and stylesheet hashes recover with safe MIME types", async () => {
