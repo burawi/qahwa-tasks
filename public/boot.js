@@ -1,9 +1,20 @@
 (function () {
   "use strict";
 
-  var attemptKey = "qahwa-bootstrap-recovery-v6";
+  var attemptKey = "qahwa-bootstrap-recovery-v7";
   var ready = false;
   var timer;
+
+  function bypassPoisonedStylesheets() {
+    Array.prototype.forEach.call(document.querySelectorAll('link[rel="stylesheet"][href]'), function (link) {
+      var url = new URL(link.href, location.href);
+      if (url.origin !== location.origin || url.searchParams.get("qahwa-style") === "v7") return;
+      url.searchParams.set("qahwa-style", "v7");
+      link.href = url.toString();
+    });
+  }
+
+  bypassPoisonedStylesheets();
 
   function messageFrom(value) {
     if (!value) return "The application could not start.";
@@ -58,7 +69,7 @@
       return Promise.all(keys.filter(function (key) { return key.indexOf("qahwa-tasks-") === 0; }).map(function (key) { return caches.delete(key); }));
     }));
     Promise.allSettled(work).then(function () {
-      location.replace("/?recovery=v6&bootstrap=" + Date.now());
+      location.replace("/?recovery=v7&bootstrap=" + Date.now());
     });
   }
 

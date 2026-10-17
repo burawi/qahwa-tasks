@@ -7,18 +7,20 @@ import { buildApp } from "../src/server/app.js";
 import type { Config } from "../src/server/config.js";
 import { AppDatabase } from "../src/server/database.js";
 
-test("service worker purges poisoned caches and leaves release assets to HTTP caching", () => {
+test("service worker purges Cache Storage and bypasses poisoned immutable HTTP CSS", () => {
   const source = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 
-  assert.match(source, /qahwa-tasks-v6/);
+  assert.match(source, /qahwa-tasks-v7/);
   assert.doesNotMatch(source, /STATIC_ASSETS\s*=\s*\[[^\]]*["']\/["']/s);
   assert.match(source, /event\.request\.mode === "navigate"/);
   assert.match(source, /legacyCaches\.length > 0/);
   assert.doesNotMatch(source, /await .*client\.navigate/);
-  assert.match(source, /searchParams\.get\("recovery"\) === "v6"/);
-  assert.match(source, /recoveryUrl\.searchParams\.set\("recovery", "v6"\)/);
+  assert.match(source, /searchParams\.get\("recovery"\) === "v7"/);
+  assert.match(source, /recoveryUrl\.searchParams\.set\("recovery", "v7"\)/);
   assert.match(source, /client\.navigate\(recoveryUrl\.toString\(\)\)\.catch/);
   assert.match(source, /STATIC_ASSETS\.includes\(url\.pathname\)/);
+  assert.match(source, /url\.pathname\.endsWith\("\.css"\)/);
+  assert.match(source, /url\.searchParams\.set\("qahwa-style", STYLE_RECOVERY\)/);
   assert.doesNotMatch(source, /cache\.put\(event\.request/);
   assert.match(source, /You are offline\. Reconnect and reload to continue\./);
 });
@@ -46,7 +48,7 @@ test("pre-bundle guard recovers once and makes bootstrap failures visible", () =
   const source = readFileSync(new URL("../public/boot.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
 
-  assert.match(html, /<script src="\/boot\.js\?v=6"><\/script>/);
+  assert.match(html, /<script src="\/boot\.js\?v=7"><\/script>/);
   assert.match(source, /api\/client-diagnostics/);
   assert.match(source, /getRegistrations/);
   assert.match(source, /qahwa-tasks-/);
@@ -54,6 +56,8 @@ test("pre-bundle guard recovers once and makes bootstrap failures visible", () =
   assert.match(source, /bootstrap-timeout/);
   assert.match(source, /target\.tagName === "SCRIPT"/);
   assert.match(source, /\.origin === location\.origin/);
+  assert.match(source, /link\[rel="stylesheet"\]\[href\]/);
+  assert.match(source, /searchParams\.set\("qahwa-style", "v7"\)/);
 });
 
 test("unknown historical script and stylesheet hashes recover with safe MIME types", async () => {
@@ -84,7 +88,7 @@ test("unknown historical script and stylesheet hashes recover with safe MIME typ
     const other = await app.inject({ method: "GET", url: "/assets/retired.png" });
     assert.equal(other.statusCode, 404);
 
-    const boot = await app.inject({ method: "GET", url: "/boot.js?v=6" });
+    const boot = await app.inject({ method: "GET", url: "/boot.js?v=7" });
     assert.equal(boot.statusCode, 200);
     assert.equal(boot.headers["cache-control"], "no-store");
 
