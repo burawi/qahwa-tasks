@@ -2,6 +2,7 @@ import { Archive, ArchiveRestore, Download, LogOut, Pencil, Plus, Trash2, X } fr
 import { useEffect, useState } from "react";
 import type { Project } from "../../domain/types";
 import { api } from "../api";
+import { projectColorStyle } from "../project-color";
 
 export function ProjectManager({ onClose, onChanged, onError }: { onClose: () => void; onChanged: () => void; onError: (message: string) => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -16,7 +17,7 @@ export function ProjectManager({ onClose, onChanged, onError }: { onClose: () =>
     <header className="sheet-header"><div><h1>Projects</h1><p>Names, task IDs and working directories</p></div><button className="icon-button" type="button" onClick={onClose}><X /></button></header>
     <main className="project-list">
       <button className="add-project-card" type="button" onClick={() => setEditing("new")}><Plus />Add project</button>
-      {projects.map((project) => <article key={project.id} className={`project-card${project.archivedAt ? " archived" : ""}`}>
+      {projects.map((project) => <article key={project.id} className={`project-card project-accent${project.archivedAt ? " archived" : ""}`} style={projectColorStyle(project.id)}>
         <div className="prefix-badge">{project.prefix}</div>
         <div><strong>{project.name}</strong><code>{project.rootDirectory}</code><small>{project.taskCount} task{project.taskCount === 1 ? "" : "s"}{project.archivedAt ? " · Archived" : ""}</small></div>
         <div className="project-actions">

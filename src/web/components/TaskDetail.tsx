@@ -2,6 +2,7 @@ import { ArrowLeft, Check, ChevronDown, ChevronRight, History, MessageCircle, Pe
 import { useEffect, useMemo, useState } from "react";
 import { documentFromPlainText, emptyDocument, type RichTextDocument, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
 import { api } from "../api";
+import { projectColorStyle } from "../project-color";
 import { RichEditor, RichView } from "./RichEditor";
 
 interface Props {
@@ -58,9 +59,9 @@ export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
   };
 
   return <div className="detail-page">
-    <header className="detail-header">
+    <header className="detail-header project-accent" style={projectColorStyle(task.projectId)}>
       <button type="button" className="icon-button" onClick={onClose} aria-label="Back"><ArrowLeft /></button>
-      <div><span>{task.humanId}</span><small>{task.projectName}</small></div>
+      <div><span>{task.humanId}</span><small className="project-label"><span className="project-dot" />{task.projectName}</small></div>
       {!editing && <button type="button" className="icon-button" onClick={() => setEditing(true)} aria-label="Edit"><Pencil /></button>}
     </header>
 
