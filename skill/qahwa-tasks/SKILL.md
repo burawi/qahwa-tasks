@@ -35,6 +35,20 @@ Before substantially expanding an existing note or rewriting it into a detailed 
 
 ## Perform tasks
 
+### Keep the main session as the orchestrator
+
+For any request to implement, perform, or revise Qahwa tasks, the main session must remain an orchestration layer and must not do task-specific repository work itself.
+
+- The main session may list the requested queue, select the next task, dispatch workers, receive compact results, and verify final task statuses.
+- Delegate each task to a new subagent with `fork_turns="none"`. Do not reuse a worker for another task and do not pass accumulated parent conversation history.
+- Give the worker only the task ID, the user's current scope/order, and an instruction to read and follow this skill. The worker must load the task details and project root itself.
+- Run one task worker at a time in global priority order unless the user explicitly chooses another order. Wait until that worker has submitted or reported a blocker before dispatching the next task.
+- The worker owns the complete task lifecycle: `get_task`, `start_task`, unresolved-comment handling, repository work, validation, final task re-read, and `submit_for_review`.
+- Require a compact worker result containing only task ID, resulting status, summary, validation, and limitations. Do not return implementation logs, full task content, or repository exploration to the main session.
+- Apply the same fresh-worker rule when review feedback requires implementation changes.
+- Record-only actions such as listing, creating, prioritizing, commenting on, or explicitly closing tasks may be performed directly by the main session when no repository implementation is involved.
+- If fresh subagents are unavailable, stop and explain that the required isolated-worker workflow cannot be followed; do not fall back to implementing tasks in the main session.
+
 1. A task must pass through `backlog -> todo -> in_progress`; never start directly from Backlog.
 2. Call `start_task` immediately before substantive work. This notifies the user.
 3. Check unresolved comments and current task version before editing or implementing.
@@ -43,6 +57,26 @@ Before substantially expanding an existing note or rewriting it into a detailed 
 6. Before review, re-read the current task and check for comments added during work.
 7. Call `submit_for_review` with a compact handoff: session ID when available, summary, validation, commit hash when applicable, and limitations. This notifies the user.
 8. After review submission, stop loading that task while working on later tasks unless the user returns to it.
+
+### Commit approval proposals
+
+For completed coding work that is suitable for a scoped commit, include `commitProposal` in `submit_for_review`. Record the proposed message, exact Git repository root, full current HEAD revision, every reviewed repository-relative file, and a concise release note. Include no file that was not reviewed, and omit the proposal when the repository is not Git-backed or the exact scope is uncertain.
+
+- The user-facing approval is the only authority to create this commit. Submitting a proposal does not authorize Codex to commit it.
+- Approval runs in the Qahwa Tasks backend without starting a Codex session. It refuses revision or reviewed-file drift and commits through an isolated Git index so unrelated staged and dirty files remain excluded and preserved.
+- Approval never pushes, publishes, or deploys. A successful commit is collected in the project's single active `Publish/deploy changes` Todo for later explicit instructions.
+- If approval fails, inspect the reported drift or scope conflict and submit a fresh reviewed output when appropriate. Never broaden the scope to make approval pass.
+
+### Frontend review previews
+
+For a frontend task that can be safely previewed, run it with representative mock data and no production credentials or destructive integrations. Bind only the review server needed for the task, expose it through the machine's approved Tailscale address, and include `preview` in `submit_for_review` with the exact URL, reproducible start command, process owner, availability, and latest check time.
+
+- Confirm the page locally and from another authorized Tailscale device before recording `available`.
+- Describe it as a local review preview, never as a deployed environment.
+- After revisions, restart or refresh the process and re-check the exact URL before submitting a new output.
+- Record `stopped`, `failed`, or `unreachable` whenever the link is not usable; never leave a known-dead preview marked available.
+- Stop the process with its owning process manager or recorded PID after review, then report the stopped state in the next output. Do not use broad process-kill commands.
+- If safe mock data or an approved Tailscale address is unavailable, omit the preview and state the limitation instead of connecting production systems.
 
 ## Review and closure
 
