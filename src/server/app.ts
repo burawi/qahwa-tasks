@@ -1,0 +1,176 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import cookie from "@fastify/cookie";
+import rateLimit from "@fastify/rate-limit";
+import fastifyStatic from "@fastify/static";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { DomainError } from "../domain/errors.js";
+import type { RichTextDocument, TaskStatus } from "../domain/types.js";
+import { AuthService } from "./auth.js";
+import type { Config } from "./config.js";
+import { AppDatabase } from "./database.js";
+import { TaskService, type CreateTaskInput } from "./task-service.js";
+
+const publicRoot = join(process.cwd(), "dist/public");
+
+export interface AppContext {
+  database: AppDatabase;
+  auth: AuthService;
+  tasks: TaskService;
+}
+
+function booleanQuery(value: unknown): boolean {
+  return value === true || value === "true" || value === "1";
+}
+
+export async function buildApp(config: Config, database = new AppDatabase(config)): Promise<FastifyInstance> {
+  const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 512 * 1024 });
+  await app.register(cookie);
+  await app.register(rateLimit, { global: false });
+  const auth = new AuthService(database, config.sessionDays, config.publicBaseUrl.startsWith("https://"));
+  const tasks = new TaskService(database);
+  const context: AppContext = { database, auth, tasks };
+
+  app.addHook("onSend", async (request, reply, payload) => {
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("x-frame-options", "DENY");
+    reply.header("referrer-policy", "no-referrer");
+    reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+    reply.header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    if (config.publicBaseUrl.startsWith("https://")) reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+    if (request.url.startsWith("/api/")) reply.header("cache-control", "no-store");
+    return payload;
+  });
+
+  app.get("/health", async () => ({ status: "ok", service: "qahwa-tasks", configured: auth.isConfigured(), time: new Date().toISOString() }));
+  app.get("/api/auth/state", async (request) => ({ authenticated: auth.authenticated(request), configured: auth.isConfigured() }));
+  app.post<{ Body: { password: string } }>("/api/auth/login", {
+    config: { rateLimit: { max: 5, timeWindow: "15 minutes" } },
+  }, async (request, reply) => {
+    await auth.login(request.body.password ?? "", request, reply);
+    return { authenticated: true };
+  });
+  app.post<{ Body: { password: string; token: string } }>("/api/auth/setup", {
+    config: { rateLimit: { max: 5, timeWindow: "15 minutes" } },
+  }, async (request, reply) => {
+    await auth.setup(request.body.password ?? "", request.body.token ?? "", request, reply);
+    return { authenticated: true, configured: true };
+  });
+
+  app.addHook("preHandler", async (request, reply) => {
+    if (!request.url.startsWith("/api/") || request.url.startsWith("/api/auth/login") || request.url.startsWith("/api/auth/setup") || request.url.startsWith("/api/auth/state")) return;
+    auth.requireSession(request, reply);
+    if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) validateOrigin(request, config.publicBaseUrl);
+  });
+
+  registerAuthRoutes(app, context);
+  registerProjectRoutes(app, context);
+  registerTaskRoutes(app, context);
+  registerCommentRoutes(app, context);
+
+  if (existsSync(publicRoot)) {
+    await app.register(fastifyStatic, { root: publicRoot, wildcard: false });
+    app.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith("/api/")) return reply.code(404).send({ error: "not_found" });
+      return reply.type("text/html").sendFile("index.html");
+    });
+  }
+
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof DomainError) return reply.code(error.statusCode).send({ error: error.code, message: error.message });
+    if ((error as { code?: string }).code === "FST_ERR_CTP_INVALID_JSON_BODY") {
+      return reply.code(400).send({ error: "invalid_json", message: "Invalid JSON body" });
+    }
+    app.log.error(error);
+    return reply.code(500).send({ error: "internal_error", message: "Something went wrong" });
+  });
+
+  app.addHook("onClose", async () => database.close());
+  return app;
+}
+
+function validateOrigin(request: FastifyRequest, publicBaseUrl: string): void {
+  const origin = request.headers.origin;
+  if (!origin) return;
+  const allowed = new Set([publicBaseUrl, `http://127.0.0.1:${new URL(publicBaseUrl).port || "3022"}`, "http://localhost:5173"]);
+  if (!allowed.has(origin)) throw new DomainError("Origin not allowed", "invalid_origin", 403);
+}
+
+function registerAuthRoutes(app: FastifyInstance, context: AppContext): void {
+  app.post("/api/auth/logout", async (request, reply) => {
+    context.auth.logout(request, reply);
+    return { authenticated: false };
+  });
+  app.post("/api/auth/revoke-all", async (request, reply) => {
+    context.auth.revokeAll();
+    reply.clearCookie("qahwa_tasks_session", { path: "/" });
+    return { revoked: true };
+  });
+}
+
+function registerProjectRoutes(app: FastifyInstance, context: AppContext): void {
+  app.get<{ Querystring: { includeArchived?: string } }>("/api/projects", async (request) => ({
+    projects: context.tasks.listProjects(booleanQuery(request.query.includeArchived)),
+  }));
+  app.post<{ Body: { name: string; prefix?: string; rootDirectory: string } }>("/api/projects", async (request, reply) => {
+    const project = context.tasks.createProject(request.body, "user");
+    return reply.code(201).send({ project });
+  });
+  app.patch<{ Params: { id: string }; Body: { name?: string; prefix?: string; rootDirectory?: string } }>(
+    "/api/projects/:id", async (request) => ({ project: context.tasks.updateProject(request.params.id, request.body, "user") }),
+  );
+  app.post<{ Params: { id: string }; Body: { archived: boolean } }>("/api/projects/:id/archive", async (request) => ({
+    project: context.tasks.archiveProject(request.params.id, Boolean(request.body.archived), "user"),
+  }));
+  app.delete<{ Params: { id: string } }>("/api/projects/:id", async (request, reply) => {
+    context.tasks.deleteProject(request.params.id, "user");
+    return reply.code(204).send();
+  });
+}
+
+function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
+  app.get<{ Querystring: { tab?: "backlog" | "todo" | "open" | "closed"; projectId?: string } }>(
+    "/api/tasks", async (request) => ({ tasks: context.tasks.listTasks(request.query) }),
+  );
+  app.post<{ Body: CreateTaskInput }>("/api/tasks", async (request, reply) => {
+    const task = context.tasks.createTask(request.body, "user");
+    return reply.code(201).send({ task });
+  });
+  app.get<{ Params: { id: string }; Querystring: { includeResolved?: string } }>("/api/tasks/:id", async (request) => ({
+    task: context.tasks.getTask(request.params.id, request.query.includeResolved !== "false"),
+  }));
+  app.patch<{ Params: { id: string }; Body: { title?: string; description?: RichTextDocument; expectedVersion: number } }>(
+    "/api/tasks/:id", async (request) => ({ task: context.tasks.updateTask(request.params.id, request.body, "user") }),
+  );
+  app.post<{ Params: { id: string }; Body: { to: TaskStatus; outcome?: "completed" | "cancelled" } }>(
+    "/api/tasks/:id/transition", async (request) => ({ task: context.tasks.transition(request.params.id, request.body, "user") }),
+  );
+  app.post<{ Params: { id: string }; Body: { beforeId?: string | null; afterId?: string | null } }>(
+    "/api/tasks/:id/reorder", async (request) => ({ task: context.tasks.reorder(request.params.id, request.body, "user") }),
+  );
+  app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
+    context.tasks.deleteBacklogTask(request.params.id, "user");
+    return reply.code(204).send();
+  });
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/activity", async (request) => ({
+    activity: context.tasks.activityForTask(request.params.id),
+  }));
+  app.get("/api/export", async (_request, reply) => reply
+    .header("content-disposition", `attachment; filename="qahwa-tasks-${new Date().toISOString().slice(0, 10)}.json"`)
+    .send(context.tasks.exportData()));
+}
+
+function registerCommentRoutes(app: FastifyInstance, context: AppContext): void {
+  app.post<{
+    Params: { id: string };
+    Body: { body: RichTextDocument; parentId?: string; requiresResponse?: boolean };
+  }>("/api/tasks/:id/comments", async (request, reply) => {
+    const comment = context.tasks.addComment(request.params.id, request.body, "user");
+    return reply.code(201).send({ comment });
+  });
+  app.post<{ Params: { id: string }; Body: { resolved: boolean; reply?: RichTextDocument } }>(
+    "/api/comments/:id/resolution", async (request) => ({
+      comment: context.tasks.resolveComment(request.params.id, Boolean(request.body.resolved), "user", request.body.reply),
+    }),
+  );
+}

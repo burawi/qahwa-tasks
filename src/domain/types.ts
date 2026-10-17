@@ -1,0 +1,123 @@
+export const TASK_STATUSES = ["backlog", "todo", "in_progress", "in_review", "closed"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+export type TaskOutcome = "completed" | "cancelled" | null;
+export type Actor = "user" | "codex" | "system";
+export type CommentKind = "comment" | "handoff";
+
+export interface RichTextNode {
+  type?: string;
+  text?: string;
+  attrs?: Record<string, unknown>;
+  marks?: Array<{ type: string; attrs?: Record<string, unknown> }>;
+  content?: RichTextNode[];
+}
+
+export interface RichTextDocument extends RichTextNode {
+  type: "doc";
+  content?: RichTextNode[];
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  prefix: string;
+  rootDirectory: string;
+  archivedAt: string | null;
+  taskCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskSummary {
+  id: string;
+  humanId: string;
+  projectId: string;
+  projectName: string;
+  projectPrefix: string;
+  title: string;
+  status: TaskStatus;
+  outcome: TaskOutcome;
+  rank: number;
+  unresolvedCommentCount: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  parentId: string | null;
+  author: Actor;
+  kind: CommentKind;
+  body: RichTextDocument;
+  plainText: string;
+  requiresResponse: boolean;
+  resolvedAt: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  replies: TaskComment[];
+}
+
+export interface TaskDetail extends TaskSummary {
+  rootDirectory: string;
+  description: RichTextDocument;
+  comments: TaskComment[];
+  latestHandoff: TaskComment | null;
+}
+
+export interface HandoffInput {
+  sessionId?: string;
+  runId?: string;
+  summary: string;
+  validation?: string[];
+  commit?: string;
+  limitations?: string[];
+}
+
+export const emptyDocument = (): RichTextDocument => ({ type: "doc", content: [{ type: "paragraph" }] });
+
+export function plainTextFromDocument(document: RichTextDocument): string {
+  const pieces: string[] = [];
+  const visit = (node: RichTextNode): void => {
+    if (node.text) pieces.push(node.text);
+    node.content?.forEach(visit);
+    if (["paragraph", "heading", "listItem", "taskItem"].includes(node.type ?? "")) pieces.push("\n");
+  };
+  visit(document);
+  return pieces.join("").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export function documentFromPlainText(text: string): RichTextDocument {
+  const paragraphs = text.trim().split(/\n{2,}/).filter(Boolean);
+  return {
+    type: "doc",
+    content: (paragraphs.length ? paragraphs : [""]).map((paragraph) => ({
+      type: "paragraph",
+      content: paragraph ? [{ type: "text", text: paragraph }] : undefined,
+    })),
+  };
+}
+
+export function documentFromSections(sections: Array<{ heading: string; body: string | string[] }>): RichTextDocument {
+  const content: RichTextNode[] = [];
+  for (const section of sections) {
+    const values = Array.isArray(section.body) ? section.body.filter(Boolean) : [section.body].filter(Boolean);
+    if (!values.length) continue;
+    content.push({ type: "heading", attrs: { level: 3 }, content: [{ type: "text", text: section.heading }] });
+    if (Array.isArray(section.body)) {
+      content.push({
+        type: section.heading.toLowerCase() === "done when" ? "taskList" : "bulletList",
+        content: values.map((value) => ({
+          type: section.heading.toLowerCase() === "done when" ? "taskItem" : "listItem",
+          attrs: section.heading.toLowerCase() === "done when" ? { checked: false } : undefined,
+          content: [{ type: "paragraph", content: [{ type: "text", text: value }] }],
+        })),
+      });
+    } else {
+      content.push({ type: "paragraph", content: [{ type: "text", text: values[0] }] });
+    }
+  }
+  return { type: "doc", content: content.length ? content : [{ type: "paragraph" }] };
+}

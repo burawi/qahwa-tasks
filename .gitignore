@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+data/
+backups/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.enc
+npm-debug.log*
