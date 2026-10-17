@@ -11,6 +11,7 @@ import {
   type HandoffInput,
   type Project,
   type ProjectLogo,
+  type RelatedTask,
   type RichTextDocument,
   type TaskComment,
   type TaskDetail,
@@ -271,7 +272,39 @@ export class TaskService {
       ...taskFromRow(row), rootDirectory: row.root_directory, description: parseDocument(row.description_json), comments,
       outputs: this.outputsForTask(row.id),
       latestHandoff: [...comments].reverse().find((comment) => comment.kind === "handoff") ?? null,
+      relatedTasks: this.relatedTasksForTask(row.id),
     };
+  }
+
+  addRelatedTask(id: string, relatedId: string, actor: Actor): TaskDetail {
+    const task = this.getTask(id);
+    const related = this.getTask(relatedId);
+    assertDomain(task.id !== related.id, "A task cannot be related to itself", "self_relationship");
+    const [lowId, highId] = [task.id, related.id].sort();
+    const result = this.database.db.prepare(`
+      INSERT OR IGNORE INTO task_relationships (task_low_id, task_high_id, created_at, created_by)
+      VALUES (?, ?, ?, ?)
+    `).run(lowId, highId, now(), actor);
+    if (result.changes > 0) {
+      this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "task.relationship_added", details: { relatedTaskId: related.humanId } });
+      this.activity({ taskId: related.id, projectId: related.projectId, actor, eventType: "task.relationship_added", details: { relatedTaskId: task.humanId } });
+    }
+    return this.getTask(task.id);
+  }
+
+  removeRelatedTask(id: string, relatedId: string, actor: Actor): TaskDetail {
+    const task = this.getTask(id);
+    const related = this.getTask(relatedId);
+    assertDomain(task.id !== related.id, "A task cannot be related to itself", "self_relationship");
+    const [lowId, highId] = [task.id, related.id].sort();
+    const result = this.database.db.prepare(
+      "DELETE FROM task_relationships WHERE task_low_id = ? AND task_high_id = ?",
+    ).run(lowId, highId);
+    if (result.changes > 0) {
+      this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "task.relationship_removed", details: { relatedTaskId: related.humanId } });
+      this.activity({ taskId: related.id, projectId: related.projectId, actor, eventType: "task.relationship_removed", details: { relatedTaskId: task.humanId } });
+    }
+    return this.getTask(task.id);
   }
 
   updateTask(id: string, input: { title?: string; description?: RichTextDocument; expectedVersion: number }, actor: Actor): TaskDetail {
@@ -549,6 +582,28 @@ export class TaskService {
     const rows = this.database.db.prepare("SELECT * FROM task_outputs WHERE task_id = ? ORDER BY created_at, rowid")
       .all(taskId) as OutputRow[];
     return rows.map((row) => this.outputFromRow(row));
+  }
+
+  private relatedTasksForTask(taskId: string): RelatedTask[] {
+    return this.database.db.prepare(`
+      SELECT t.id, t.human_id, t.project_id, p.name AS project_name, p.prefix AS project_prefix,
+        t.title, t.status, t.outcome
+      FROM task_relationships r
+      JOIN tasks t ON t.id = CASE WHEN r.task_low_id = ? THEN r.task_high_id ELSE r.task_low_id END
+      JOIN projects p ON p.id = t.project_id
+      WHERE r.task_low_id = ? OR r.task_high_id = ?
+      ORDER BY p.name COLLATE NOCASE, t.human_id COLLATE NOCASE
+    `).all(taskId, taskId, taskId).map((row) => {
+      const value = row as {
+        id: string; human_id: string; project_id: string; project_name: string; project_prefix: string;
+        title: string; status: TaskStatus; outcome: TaskOutcome;
+      };
+      return {
+        id: value.id, humanId: value.human_id, projectId: value.project_id,
+        projectName: value.project_name, projectPrefix: value.project_prefix, title: value.title,
+        status: value.status, outcome: value.outcome,
+      };
+    });
   }
 
   private outputById(id: string): TaskOutput {

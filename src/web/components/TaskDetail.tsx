@@ -1,6 +1,6 @@
 import { ArrowLeft, Check, ChevronDown, ChevronRight, FileOutput, History, MessageCircle, Pencil, RotateCcw, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { documentFromPlainText, emptyDocument, type RichTextDocument, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
+import React, { useEffect, useMemo, useState } from "react";
+import { documentFromPlainText, emptyDocument, type RelatedTask, type RichTextDocument, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
 import { api } from "../api";
 import { projectColorStyle } from "../project-color";
 import { RichEditor, RichView } from "./RichEditor";
@@ -10,10 +10,11 @@ interface Props {
   taskId: string;
   onClose: () => void;
   onChanged: () => void;
+  onNavigate: (humanId: string) => void;
   onError: (message: string) => void;
 }
 
-export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
+export function TaskDetail({ taskId, onClose, onNavigate, onChanged, onError }: Props) {
   const [task, setTask] = useState<TaskDetailType | null>(null);
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
@@ -99,6 +100,8 @@ export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
         </article>)}
       </section>
 
+      <RelatedTaskList tasks={task.relatedTasks} onNavigate={onNavigate} />
+
       <section className="comments-section">
         <h2><MessageCircle />Comments <span>{unresolved.length}</span></h2>
         {unresolved.length === 0 && <p className="empty-note">No open comment threads.</p>}
@@ -116,6 +119,21 @@ export function TaskDetail({ taskId, onClose, onChanged, onError }: Props) {
       </section>
     </main>
   </div>;
+}
+
+export function RelatedTaskList({ tasks, onNavigate }: { tasks: RelatedTask[]; onNavigate: (humanId: string) => void }) {
+  if (tasks.length === 0) return null;
+  return <section className="related-section">
+    <h2>Related tasks <span>{tasks.length}</span></h2>
+    <div className="related-task-list">{tasks.map((related) => <a
+      className="related-task-card" href={`/tasks/${encodeURIComponent(related.humanId)}`} key={related.id}
+      onClick={(event) => { event.preventDefault(); onNavigate(related.humanId); }}
+    >
+      <span><strong>{related.humanId}</strong><small>{related.projectName}</small></span>
+      <b>{related.title}</b>
+      <span className={`status-pill ${related.status}`}>{statusLabel(related.status)}</span>
+    </a>)}</div>
+  </section>;
 }
 
 function OutputList({ label, items }: { label: string; items: string[] }) {

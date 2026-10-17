@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status_rank ON tasks(status, rank, created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, status);
 
+CREATE TABLE IF NOT EXISTS task_relationships (
+  task_low_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  task_high_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  created_by TEXT NOT NULL CHECK(created_by IN ('user','codex','system')),
+  PRIMARY KEY (task_low_id, task_high_id),
+  CHECK (task_low_id < task_high_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_relationships_high ON task_relationships(task_high_id);
+
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

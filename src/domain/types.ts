@@ -53,6 +53,17 @@ export interface TaskSummary {
   updatedAt: string;
 }
 
+export interface RelatedTask {
+  id: string;
+  humanId: string;
+  projectId: string;
+  projectName: string;
+  projectPrefix: string;
+  title: string;
+  status: TaskStatus;
+  outcome: TaskOutcome;
+}
+
 export interface TaskComment {
   id: string;
   taskId: string;
@@ -89,6 +100,7 @@ export interface TaskDetail extends TaskSummary {
   comments: TaskComment[];
   outputs: TaskOutput[];
   latestHandoff: TaskComment | null;
+  relatedTasks: RelatedTask[];
 }
 
 export interface HandoffInput {

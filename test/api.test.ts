@@ -108,6 +108,45 @@ test("web API records review feedback but cannot return a task to work", async (
   } finally { await app.close(); }
 });
 
+test("related-task API exposes a bidirectional cross-project lifecycle", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "qahwa-tasks-related-api-"));
+  const projectRoot = join(dataDir, "project");
+  mkdirSync(projectRoot);
+  const config: Config = {
+    host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
+    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
+    qahwaNotifyTokenFile: join(dataDir, "token"),
+  };
+  const database = new AppDatabase(config);
+  await new AuthService(database, 365, true).setPassword("correct horse battery staple");
+  const tasks = new TaskService(database);
+  const firstProject = tasks.createProject({ name: "First", prefix: "FST", rootDirectory: projectRoot }, "user");
+  const secondProject = tasks.createProject({ name: "Second", prefix: "SND", rootDirectory: projectRoot }, "user");
+  const first = tasks.createTask({ projectId: firstProject.id, title: "First task" }, "user");
+  const second = tasks.createTask({ projectId: secondProject.id, title: "Second task" }, "user");
+  const app = await buildApp(config, database);
+  try {
+    const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+    const linked = await app.inject({
+      method: "POST", url: `/api/tasks/${first.humanId}/related`, headers: { cookie }, payload: { relatedTaskId: second.humanId },
+    });
+    assert.equal(linked.statusCode, 200);
+    assert.equal(linked.json().task.relatedTasks[0].humanId, second.humanId);
+    const reverse = await app.inject({ method: "GET", url: `/api/tasks/${second.humanId}`, headers: { cookie } });
+    assert.equal(reverse.json().task.relatedTasks[0].humanId, first.humanId);
+    const self = await app.inject({
+      method: "POST", url: `/api/tasks/${first.humanId}/related`, headers: { cookie }, payload: { relatedTaskId: first.humanId },
+    });
+    assert.equal(self.statusCode, 400);
+    const removed = await app.inject({
+      method: "DELETE", url: `/api/tasks/${second.humanId}/related/${first.humanId}`, headers: { cookie },
+    });
+    assert.equal(removed.statusCode, 200);
+    assert.deepEqual(removed.json().task.relatedTasks, []);
+  } finally { await app.close(); }
+});
+
 test("project logo API authenticates, validates, and serves uploaded images", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "qahwa-tasks-logo-api-"));
   const projectRoot = join(dataDir, "project");

@@ -143,6 +143,41 @@ test("deletes only Backlog tasks and only empty projects", () => {
   } finally { database.close(); }
 });
 
+test("maintains deduplicated bidirectional relationships across projects", () => {
+  const { database, tasks, project, root } = fixture();
+  try {
+    const otherProject = tasks.createProject({ name: "Majenna", prefix: "MAJ", rootDirectory: root }, "user");
+    const first = tasks.createTask({ projectId: project.id, title: "First" }, "user");
+    const second = tasks.createTask({ projectId: otherProject.id, title: "Second", status: "todo" }, "user");
+    tasks.addRelatedTask(first.humanId, second.humanId, "codex");
+    tasks.addRelatedTask(second.id, first.id, "codex");
+    assert.deepEqual(tasks.getTask(first.id).relatedTasks.map((task) => task.humanId), [second.humanId]);
+    assert.deepEqual(tasks.getTask(second.id).relatedTasks.map((task) => task.humanId), [first.humanId]);
+    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM task_relationships").get().count, 1);
+    assert.throws(() => tasks.addRelatedTask(first.id, first.humanId, "codex"), /cannot be related to itself/);
+
+    tasks.transition(second.id, { to: "in_progress" }, "codex");
+    tasks.transition(second.id, { to: "closed", outcome: "cancelled", explicitUserInstruction: "Cancel second" }, "codex");
+    assert.equal(tasks.getTask(first.id).relatedTasks[0]?.status, "closed");
+    tasks.deleteBacklogTask(first.id, "user");
+    assert.deepEqual(tasks.getTask(second.id).relatedTasks, []);
+    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM task_relationships").get().count, 0);
+  } finally { database.close(); }
+});
+
+test("removing a relationship is bidirectional and idempotent", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    const first = tasks.createTask({ projectId: project.id, title: "First" }, "user");
+    const second = tasks.createTask({ projectId: project.id, title: "Second" }, "user");
+    tasks.addRelatedTask(first.id, second.id, "user");
+    tasks.removeRelatedTask(second.humanId, first.humanId, "codex");
+    tasks.removeRelatedTask(first.id, second.id, "codex");
+    assert.deepEqual(tasks.getTask(first.id).relatedTasks, []);
+    assert.deepEqual(tasks.getTask(second.id).relatedTasks, []);
+  } finally { database.close(); }
+});
+
 test("protects edits with optimistic task versions", () => {
   const { database, tasks, project } = fixture();
   try {

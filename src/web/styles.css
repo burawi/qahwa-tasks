@@ -175,7 +175,7 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .detail-header small { color: var(--muted); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .detail-header .project-label { color: var(--project-color); }
 .detail-content, .project-list { width: 100%; max-width: 760px; margin: 0 auto; padding: 20px 16px calc(40px + env(safe-area-inset-bottom)); display: grid; gap: 22px; }
-.detail-content > *, .output-section, .comments-section, .comment-thread, .comment-bubble, .resolved-comments { min-width: 0; max-width: 100%; }
+.detail-content > *, .output-section, .related-section, .comments-section, .comment-thread, .comment-bubble, .resolved-comments { min-width: 0; max-width: 100%; }
 .detail-loading { display: grid; min-height: 100dvh; place-items: center; color: var(--muted); }
 .task-copy h1 { margin: 0 0 15px; font-size: clamp(24px, 7vw, 34px); letter-spacing: -.035em; line-height: 1.12; }
 .edit-panel { display: grid; gap: 16px; }
@@ -188,9 +188,15 @@ button.danger-subtle { border: 1px solid transparent; background: var(--red-soft
 .status-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .status-actions button { flex: 1 1 auto; }
 
-.output-section, .comments-section { display: grid; gap: 12px; }
-.output-section h2, .comments-section h2 { margin: 0; display: flex; align-items: center; gap: 7px; font-size: 17px; }
-.output-section h2 span, .comments-section h2 span { padding: 2px 7px; border-radius: 99px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.output-section, .related-section, .comments-section { display: grid; gap: 12px; }
+.output-section h2, .related-section h2, .comments-section h2 { margin: 0; display: flex; align-items: center; gap: 7px; font-size: 17px; }
+.output-section h2 span, .related-section h2 span, .comments-section h2 span { padding: 2px 7px; border-radius: 99px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.related-task-list { display: grid; gap: 9px; }
+.related-task-card { width: 100%; display: grid; grid-template-columns: minmax(7rem, auto) 1fr auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); color: inherit; text-align: left; text-decoration: none; }
+.related-task-card:hover { border-color: var(--accent); }
+.related-task-card > span:first-child { display: grid; gap: 2px; }
+.related-task-card small { color: var(--muted); font-weight: 500; }
+.related-task-card > b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .output-card { padding: 14px; border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--line)); border-radius: 16px; background: var(--blue-soft); display: grid; gap: 11px; }
 .output-card header { display: grid; gap: 4px; }
 .output-card header strong { line-height: 1.4; }

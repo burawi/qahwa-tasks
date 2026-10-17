@@ -7,7 +7,7 @@ import { AppDatabase } from "../server/database.js";
 import { NotificationWorker } from "../server/notification-worker.js";
 import { QahwaNotifier } from "../server/notifier.js";
 import { TaskService } from "../server/task-service.js";
-import { returnTaskToWork } from "./workflow.js";
+import { addRelatedTask, removeRelatedTask, returnTaskToWork } from "./workflow.js";
 
 const config = loadConfig();
 const database = new AppDatabase(config);
@@ -36,6 +36,9 @@ const compactTask = (task: ReturnType<TaskService["getTask"]>) => ({
     limitations: output.limitations, sessionId: output.sessionId, runId: output.runId, artifacts: output.artifacts,
   })),
   latestHandoff: task.latestHandoff ? { text: task.latestHandoff.plainText, metadata: task.latestHandoff.metadata } : null,
+  relatedTasks: task.relatedTasks.map((related) => ({
+    id: related.humanId, project: related.projectName, title: related.title, status: related.status, outcome: related.outcome,
+  })),
 });
 
 server.registerTool("list_projects", {
@@ -131,6 +134,16 @@ server.registerTool("resolve_comment", {
 }, ({ commentId, resolved, reply }) => text(tasks.resolveComment(
   commentId, resolved, "codex", reply ? documentFromPlainText(reply) : undefined,
 )));
+
+server.registerTool("add_related_task", {
+  description: "Create one durable bidirectional relationship between two tasks. Existing links are left unchanged.",
+  inputSchema: { taskId: z.string(), relatedTaskId: z.string() },
+}, ({ taskId, relatedTaskId }) => text(compactTask(addRelatedTask(tasks, taskId, relatedTaskId))));
+
+server.registerTool("remove_related_task", {
+  description: "Remove a bidirectional relationship between two tasks. Missing links are left unchanged.",
+  inputSchema: { taskId: z.string(), relatedTaskId: z.string() },
+}, ({ taskId, relatedTaskId }) => text(compactTask(removeRelatedTask(tasks, taskId, relatedTaskId))));
 
 server.registerTool("submit_for_review", {
   description: "Append a structured Codex output and move an in-progress task to in-review. This queues a Qahwa Notify alert.",

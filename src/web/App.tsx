@@ -72,6 +72,7 @@ export function App() {
     setSelectedTask(task.humanId);
   };
   const closeTask = () => { history.pushState({}, "", "/"); setSelectedTask(null); };
+  const navigateTask = (humanId: string) => { history.pushState({}, "", `/tasks/${humanId}`); setSelectedTask(humanId); };
 
   const reorder = async ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return;
@@ -138,7 +139,7 @@ export function App() {
       } catch (error) { handleAuthError(error); }
     }} />}
     {showProjects && <ProjectManager onClose={() => setShowProjects(false)} onChanged={() => void refresh()} onError={fail} />}
-    {selectedTask && <TaskDetail taskId={selectedTask} onClose={closeTask} onChanged={() => void loadTasks()} onError={fail} />}
+    {selectedTask && <TaskDetail taskId={selectedTask} onClose={closeTask} onNavigate={navigateTask} onChanged={() => void loadTasks()} onError={fail} />}
     </Suspense>
     {toast && <div className="toast">{toast}</div>}
   </div>;

@@ -169,6 +169,16 @@ function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
   app.post<{ Params: { id: string }; Body: { beforeId?: string | null; afterId?: string | null } }>(
     "/api/tasks/:id/reorder", async (request) => ({ task: context.tasks.reorder(request.params.id, request.body, "user") }),
   );
+  app.post<{ Params: { id: string }; Body: { relatedTaskId: string } }>(
+    "/api/tasks/:id/related", async (request) => ({
+      task: context.tasks.addRelatedTask(request.params.id, request.body.relatedTaskId, "user"),
+    }),
+  );
+  app.delete<{ Params: { id: string; relatedId: string } }>(
+    "/api/tasks/:id/related/:relatedId", async (request) => ({
+      task: context.tasks.removeRelatedTask(request.params.id, request.params.relatedId, "user"),
+    }),
+  );
   app.delete<{ Params: { id: string } }>("/api/tasks/:id", async (request, reply) => {
     context.tasks.deleteBacklogTask(request.params.id, "user");
     return reply.code(204).send();

@@ -62,6 +62,12 @@ export const api = {
     `/api/tasks/${id}/reorder`, { method: "POST", body: JSON.stringify({ beforeId, afterId }) },
   ),
   deleteTask: (id: string) => request<void>(`/api/tasks/${id}`, { method: "DELETE" }),
+  addRelatedTask: (id: string, relatedTaskId: string) => request<{ task: TaskDetail }>(`/api/tasks/${id}/related`, {
+    method: "POST", body: JSON.stringify({ relatedTaskId }),
+  }),
+  removeRelatedTask: (id: string, relatedTaskId: string) => request<{ task: TaskDetail }>(
+    `/api/tasks/${id}/related/${encodeURIComponent(relatedTaskId)}`, { method: "DELETE" },
+  ),
   addComment: (id: string, body: RichTextDocument, parentId?: string) => request<{ comment: TaskComment }>(
     `/api/tasks/${id}/comments`, { method: "POST", body: JSON.stringify({ body, parentId }) },
   ),
