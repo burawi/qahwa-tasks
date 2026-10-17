@@ -12,6 +12,7 @@ import { AppDatabase } from "./database.js";
 import { TaskService, type CreateTaskInput } from "./task-service.js";
 
 const publicRoot = join(process.cwd(), "dist/public");
+const legacyScriptRecovery = `void async function(){try{for(const key of await caches.keys())if(key.startsWith("qahwa-tasks-"))await caches.delete(key);const registration=await navigator.serviceWorker?.getRegistration();await registration?.update()}finally{const url=new URL("/",location.origin);url.searchParams.set("recovered",Date.now().toString());location.replace(url)}}();`;
 
 export interface AppContext {
   database: AppDatabase;
@@ -46,7 +47,7 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     const pathname = request.url.split("?", 1)[0] ?? request.url;
     if (request.url.startsWith("/api/") || pathname === "/sw.js" || pathname === "/manifest.webmanifest") {
       reply.header("cache-control", "no-store");
-    } else if (pathname.startsWith("/assets/") && reply.statusCode < 400) {
+    } else if (pathname.startsWith("/assets/") && reply.statusCode < 400 && !reply.getHeader("cache-control")) {
       reply.header("cache-control", "public, max-age=31536000, immutable");
     } else if (reply.getHeader("content-type")?.toString().startsWith("text/html")) {
       reply.header("cache-control", "no-store");
@@ -89,6 +90,12 @@ export async function buildApp(config: Config, database = new AppDatabase(config
       if (request.url.startsWith("/api/")) return reply.code(404).send({ error: "not_found" });
       const pathname = request.url.split("?", 1)[0] ?? request.url;
       if (pathname.startsWith("/assets/")) {
+        if (pathname.endsWith(".js")) {
+          return reply.header("cache-control", "no-store").type("application/javascript").send(legacyScriptRecovery);
+        }
+        if (pathname.endsWith(".css")) {
+          return reply.header("cache-control", "no-store").type("text/css").send("/* retired release stylesheet */");
+        }
         return reply.header("cache-control", "no-store").code(404).send({ error: "asset_not_found" });
       }
       return reply.type("text/html").sendFile("index.html");

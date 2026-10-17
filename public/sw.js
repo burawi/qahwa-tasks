@@ -1,4 +1,4 @@
-const CACHE = "qahwa-tasks-v2";
+const CACHE = "qahwa-tasks-v4";
 const STATIC_ASSETS = ["/manifest.webmanifest", "/icons/icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -7,8 +7,16 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))));
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const legacyCaches = keys.filter((key) => key.startsWith("qahwa-tasks-") && key !== CACHE);
+    await Promise.all(legacyCaches.map((key) => caches.delete(key)));
+    await self.clients.claim();
+    if (legacyCaches.length > 0) {
+      const clients = await self.clients.matchAll({ type: "window" });
+      await Promise.all(clients.map((client) => client.navigate(client.url)));
+    }
+  })());
 });
 
 self.addEventListener("fetch", (event) => {
@@ -24,8 +32,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
-    if (response.ok) void caches.open(CACHE).then((cache) => cache.put(event.request, response.clone()));
-    return response;
-  })));
+  if (STATIC_ASSETS.includes(url.pathname)) {
+    event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
+  }
 });
