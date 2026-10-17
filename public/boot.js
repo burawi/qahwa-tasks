@@ -77,7 +77,14 @@
     },
     report: report,
   };
-  window.addEventListener("error", function (event) { fail("window-error", event.error || event.message); }, true);
+  window.addEventListener("error", function (event) {
+    var target = event.target;
+    if (target && target !== window && target.tagName) {
+      if (target.tagName === "SCRIPT") fail("script-load-error", target.src);
+      return;
+    }
+    fail("window-error", event.error || event.message);
+  }, true);
   window.addEventListener("unhandledrejection", function (event) { fail("unhandled-rejection", event.reason); });
   timer = window.setTimeout(function () { fail("bootstrap-timeout", "The application did not render within 10 seconds."); }, 10000);
 }());
