@@ -79,6 +79,14 @@ const taskSections = {
   doneWhen: z.array(z.string()).optional(),
 };
 
+const artifactReference = z.union([
+  z.string(),
+  z.object({
+    path: z.string().optional(), url: z.string().url().optional(), filename: z.string().optional(),
+    mediaType: z.string().optional(), size: z.number().int().nonnegative().optional(),
+  }).refine((value) => Boolean(value.path) !== Boolean(value.url), "Provide exactly one path or URL"),
+]);
+
 server.registerTool("create_tasks", {
   description: "Create one or more Codex-authored tasks at the bottom of Backlog or Todo using the Goal, Details, Done when structure.",
   inputSchema: {
@@ -150,7 +158,7 @@ server.registerTool("submit_for_review", {
   inputSchema: {
     taskId: z.string(), sessionId: z.string().optional(), runId: z.string().optional(), summary: z.string().min(1),
     validation: z.array(z.string()).optional(), commit: z.string().optional(), limitations: z.array(z.string()).optional(),
-    artifacts: z.array(z.string()).optional(),
+    artifacts: z.array(artifactReference).optional(),
   },
 }, async ({ taskId, sessionId, runId, summary, validation, commit, limitations, artifacts }) => {
   const result = tasks.submitForReview(taskId, {

@@ -89,7 +89,7 @@ export interface TaskOutput {
   limitations: string[];
   sessionId: string | null;
   runId: string | null;
-  artifacts: string[];
+  artifacts: TaskArtifact[];
   sourceCommentId: string | null;
   createdAt: string;
 }
@@ -110,7 +110,29 @@ export interface HandoffInput {
   validation?: string[];
   commit?: string;
   limitations?: string[];
-  artifacts?: string[];
+  artifacts?: ArtifactReference[];
+}
+
+export type ArtifactReference = string | {
+  path?: string;
+  url?: string;
+  filename?: string;
+  mediaType?: string;
+  size?: number;
+};
+
+export type ArtifactPreviewKind = "image" | "video" | "pdf" | "none";
+export type ArtifactAvailability = "available" | "external" | "missing" | "unsupported" | "too_large" | "outside_scope";
+
+export interface TaskArtifact {
+  source: string;
+  sourceType: "path" | "url";
+  filename: string;
+  mediaType: string | null;
+  size: number | null;
+  previewKind: ArtifactPreviewKind;
+  availability: ArtifactAvailability;
+  previewUrl: string | null;
 }
 
 export const emptyDocument = (): RichTextDocument => ({ type: "doc", content: [{ type: "paragraph" }] });

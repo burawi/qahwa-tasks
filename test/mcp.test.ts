@@ -25,7 +25,10 @@ test("MCP return-to-work adapter preserves the Codex-only review transition", ()
     tasks.transition(created.id, { to: "in_progress" }, "codex");
     tasks.submitForReview(created.id, { summary: "Ready", artifacts: ["report.txt"] }, "codex");
     assert.equal(tasks.getTask(created.id).outputs[0]?.summary, "Ready");
-    assert.deepEqual(tasks.getTask(created.id).outputs[0]?.artifacts, ["report.txt"]);
+    assert.deepEqual(tasks.getTask(created.id).outputs[0]?.artifacts, [{
+      source: "report.txt", sourceType: "path", filename: "report.txt", mediaType: null, size: null,
+      previewKind: "none", availability: "missing", previewUrl: null,
+    }]);
     assert.equal(returnTaskToWork(tasks, created.id).status, "in_progress");
   } finally { database.close(); }
 });

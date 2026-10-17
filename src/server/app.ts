@@ -35,10 +35,13 @@ export async function buildApp(config: Config, database = new AppDatabase(config
 
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("x-content-type-options", "nosniff");
-    reply.header("x-frame-options", "DENY");
+    const artifactResponse = /\/api\/tasks\/[^/]+\/outputs\/[^/]+\/artifacts\/\d+/.test(request.url);
+    reply.header("x-frame-options", artifactResponse ? "SAMEORIGIN" : "DENY");
     reply.header("referrer-policy", "no-referrer");
     reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
-    reply.header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    reply.header("content-security-policy", artifactResponse
+      ? "default-src 'none'; frame-ancestors 'self'; sandbox"
+      : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; media-src 'self' https: http:; frame-src 'self' https: http:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     if (config.publicBaseUrl.startsWith("https://")) reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
     if (request.url.startsWith("/api/")) reply.header("cache-control", "no-store");
     return payload;
@@ -186,6 +189,36 @@ function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
   app.get<{ Params: { id: string } }>("/api/tasks/:id/activity", async (request) => ({
     activity: context.tasks.activityForTask(request.params.id),
   }));
+  app.get<{
+    Params: { id: string; outputId: string; index: string };
+    Querystring: { download?: string };
+  }>("/api/tasks/:id/outputs/:outputId/artifacts/:index", async (request, reply) => {
+    const index = Number(request.params.index);
+    if (!Number.isSafeInteger(index) || index < 0) throw new DomainError("Artifact not found", "artifact_not_found", 404);
+    const artifact = context.tasks.artifactFile(request.params.id, request.params.outputId, index);
+    const disposition = booleanQuery(request.query.download) ? "attachment" : "inline";
+    const safeFilename = artifact.filename.replace(/[^\x20-\x7e]|["\\]/g, "_");
+    const encodedFilename = encodeURIComponent(artifact.filename);
+    reply.header("accept-ranges", "bytes");
+    reply.header("content-disposition", `${disposition}; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
+    reply.type(artifact.mediaType);
+    const range = request.headers.range;
+    if (!range) return reply.header("content-length", artifact.size).send(createReadStream(artifact.path));
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!match || (!match[1] && !match[2])) {
+      return reply.code(416).header("content-range", `bytes */${artifact.size}`).send();
+    }
+    let start = match[1] ? Number(match[1]) : Math.max(0, artifact.size - Number(match[2]));
+    let end = match[2] && match[1] ? Number(match[2]) : artifact.size - 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= artifact.size) {
+      return reply.code(416).header("content-range", `bytes */${artifact.size}`).send();
+    }
+    end = Math.min(end, artifact.size - 1);
+    return reply.code(206)
+      .header("content-range", `bytes ${start}-${end}/${artifact.size}`)
+      .header("content-length", end - start + 1)
+      .send(createReadStream(artifact.path, { start, end }));
+  });
   app.get("/api/export", async (_request, reply) => reply
     .header("content-disposition", `attachment; filename="qahwa-tasks-${new Date().toISOString().slice(0, 10)}.json"`)
     .send(context.tasks.exportData()));

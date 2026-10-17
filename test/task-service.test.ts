@@ -101,7 +101,8 @@ test("appends structured outputs chronologically with complete provenance", () =
     assert.equal(outputs[0]?.summary, "First pass");
     assert.equal(outputs[0]?.commit, "abc123");
     assert.deepEqual(outputs[0]?.limitations, ["No browser QA"]);
-    assert.deepEqual(outputs[0]?.artifacts, ["dist/report.json"]);
+    assert.equal(outputs[0]?.artifacts[0]?.source, "dist/report.json");
+    assert.equal(outputs[0]?.artifacts[0]?.availability, "missing");
     assert.equal(outputs[1]?.summary, "Revision");
     assert.notEqual(outputs[0]?.id, outputs[1]?.id);
   } finally { database.close(); }

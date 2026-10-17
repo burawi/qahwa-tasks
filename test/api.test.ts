@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,7 +8,7 @@ import { buildApp } from "../src/server/app.js";
 import { AuthService } from "../src/server/auth.js";
 import type { Config } from "../src/server/config.js";
 import { AppDatabase } from "../src/server/database.js";
-import { TaskService } from "../src/server/task-service.js";
+import { MAX_ARTIFACT_PREVIEW_BYTES, TaskService } from "../src/server/task-service.js";
 
 test("requires authentication and issues a persistent secure session", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "qahwa-tasks-api-"));
@@ -188,5 +188,58 @@ test("project logo API authenticates, validates, and serves uploaded images", as
     const removed = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}/logo`, headers: { cookie } });
     assert.equal(removed.statusCode, 200);
     assert.equal(removed.json().project.logo, null);
+  } finally { await app.close(); }
+});
+
+test("artifact previews are authenticated, task-scoped, traversal-safe, and range-aware", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "qahwa-tasks-artifacts-"));
+  const projectRoot = join(dataDir, "project");
+  mkdirSync(projectRoot);
+  writeFileSync(join(projectRoot, "preview.png"), Buffer.from("preview-bytes"));
+  writeFileSync(join(projectRoot, "notes.txt"), "not previewable");
+  writeFileSync(join(dataDir, "secret.png"), "secret");
+  symlinkSync(join(dataDir, "secret.png"), join(projectRoot, "linked.png"));
+  writeFileSync(join(projectRoot, "large.pdf"), "");
+  truncateSync(join(projectRoot, "large.pdf"), MAX_ARTIFACT_PREVIEW_BYTES + 1);
+  const config: Config = {
+    host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
+    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
+    qahwaNotifyTokenFile: join(dataDir, "token"),
+  };
+  const database = new AppDatabase(config);
+  await new AuthService(database, 365, true).setPassword("correct horse battery staple");
+  const tasks = new TaskService(database);
+  const project = tasks.createProject({ name: "Artifacts", prefix: "ART", rootDirectory: projectRoot }, "user");
+  const task = tasks.createTask({ projectId: project.id, title: "Preview artifacts", status: "todo" }, "user");
+  const other = tasks.createTask({ projectId: project.id, title: "Other task", status: "todo" }, "user");
+  const output = tasks.addOutput(task.id, {
+    summary: "Files", artifacts: [
+      "preview.png", "notes.txt", "missing.pdf", "../secret.png", "linked.png", "large.pdf",
+      { url: "https://example.com/demo.webm", filename: "demo.webm", mediaType: "video/webm", size: 42 },
+    ],
+  }, "codex");
+  assert.deepEqual(output.artifacts.map((artifact) => artifact.availability), [
+    "available", "unsupported", "missing", "outside_scope", "outside_scope", "too_large", "external",
+  ]);
+  const app = await buildApp(config, database);
+  try {
+    const path = `/api/tasks/${task.id}/outputs/${output.id}/artifacts/0`;
+    assert.equal((await app.inject({ method: "GET", url: path })).statusCode, 401);
+    const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+    const full = await app.inject({ method: "GET", url: path, headers: { cookie } });
+    assert.equal(full.statusCode, 200);
+    assert.equal(full.headers["content-type"], "image/png");
+    assert.equal(full.headers["x-frame-options"], "SAMEORIGIN");
+    assert.equal(full.body, "preview-bytes");
+    const range = await app.inject({ method: "GET", url: path, headers: { cookie, range: "bytes=0-6" } });
+    assert.equal(range.statusCode, 206);
+    assert.equal(range.headers["content-range"], "bytes 0-6/13");
+    assert.equal(range.body, "preview");
+    assert.equal((await app.inject({ method: "GET", url: path.replace(task.id, other.id), headers: { cookie } })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: path.replace(/\/0$/, "/3"), headers: { cookie } })).statusCode, 403);
+    assert.equal((await app.inject({ method: "GET", url: path.replace(/\/0$/, "/4"), headers: { cookie } })).statusCode, 403);
+    assert.equal((await app.inject({ method: "GET", url: path.replace(/\/0$/, "/2"), headers: { cookie } })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: path.replace(/\/0$/, "/1"), headers: { cookie } })).statusCode, 415);
   } finally { await app.close(); }
 });

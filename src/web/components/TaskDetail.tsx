@@ -1,6 +1,6 @@
-import { ArrowLeft, Check, ChevronDown, ChevronRight, FileOutput, History, MessageCircle, Pencil, RotateCcw, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileOutput, History, MessageCircle, Pencil, Play, RotateCcw, Trash2, X } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
-import { documentFromPlainText, emptyDocument, type RelatedTask, type RichTextDocument, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
+import { documentFromPlainText, emptyDocument, type RelatedTask, type RichTextDocument, type TaskArtifact, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
 import { api } from "../api";
 import { projectColorStyle } from "../project-color";
 import { RichEditor, RichView } from "./RichEditor";
@@ -95,7 +95,7 @@ export function TaskDetail({ taskId, onClose, onNavigate, onChanged, onError }: 
           {output.validation.length > 0 && <OutputList label="Validation" items={output.validation} />}
           {output.commit && <p><b>Commit</b><code>{output.commit}</code></p>}
           {output.limitations.length > 0 && <OutputList label="Limitations" items={output.limitations} />}
-          {output.artifacts.length > 0 && <div><b>Artifacts</b><ul>{output.artifacts.map((artifact) => <li key={artifact}>{artifactLink(artifact)}</li>)}</ul></div>}
+          {output.artifacts.length > 0 && <div><b>Artifacts</b><div className="artifact-list">{output.artifacts.map((artifact, index) => <ArtifactPreview artifact={artifact} key={`${artifact.source}-${index}`} />)}</div></div>}
           {(output.sessionId || output.runId) && <footer>{output.sessionId && <code>Session {output.sessionId}</code>}{output.runId && <code>Run {output.runId}</code>}</footer>}
         </article>)}
       </section>
@@ -140,9 +140,65 @@ function OutputList({ label, items }: { label: string; items: string[] }) {
   return <div><b>{label}</b><ul>{items.map((item) => <li key={item}>{item}</li>)}</ul></div>;
 }
 
-function artifactLink(value: string) {
-  if (/^https?:\/\//i.test(value)) return <a href={value} target="_blank" rel="noreferrer">{value}</a>;
-  return <code>{value}</code>;
+export function ArtifactPreview({ artifact }: { artifact: TaskArtifact }) {
+  const [requested, setRequested] = useState(artifact.previewKind === "image" && artifact.sourceType === "path");
+  const href = artifact.previewUrl;
+  const downloadHref = artifact.sourceType === "path" && href
+    ? `${href}${href.includes("?") ? "&" : "?"}download=1`
+    : href;
+  const canPreview = Boolean(href && artifact.previewKind !== "none");
+  return <article className={`artifact-card ${artifact.availability}`}>
+    {canPreview && requested && <ArtifactMedia artifact={artifact} />}
+    <div className="artifact-info">
+      <strong>{artifact.filename}</strong>
+      <small>{[artifact.mediaType ?? "Unknown type", formatBytes(artifact.size)].filter(Boolean).join(" · ")}</small>
+      <code>{artifact.source}</code>
+      {!canPreview && <span className="artifact-placeholder">{artifactMessage(artifact)}</span>}
+    </div>
+    <div className="artifact-actions">
+      {canPreview && !requested && <button type="button" onClick={() => setRequested(true)}><Play />Preview</button>}
+      {href && <a href={href} target="_blank" rel="noreferrer"><ExternalLink />Open</a>}
+      {downloadHref && <a href={downloadHref} download={artifact.sourceType === "url" ? undefined : artifact.filename}><Download />Download</a>}
+    </div>
+  </article>;
+}
+
+function ArtifactMedia({ artifact }: { artifact: TaskArtifact }) {
+  if (!artifact.previewUrl) return null;
+  if (artifact.previewKind === "image") {
+    return <img className="artifact-preview" src={artifact.previewUrl} alt={artifact.filename} loading="lazy" decoding="async" />;
+  }
+  if (artifact.previewKind === "video") {
+    return <video className="artifact-preview" src={artifact.previewUrl} controls preload="metadata"><track kind="captions" /></video>;
+  }
+  if (artifact.previewKind === "pdf") {
+    return <iframe className="artifact-preview pdf" src={artifact.previewUrl} title={`Preview ${artifact.filename}`} loading="lazy" />;
+  }
+  return null;
+}
+
+function artifactMessage(artifact: TaskArtifact): string {
+  return ({
+    missing: "File is no longer available.",
+    unsupported: "Preview is not supported for this file.",
+    too_large: "File is too large to preview safely.",
+    outside_scope: "File is outside the authorized project folder.",
+    available: "Preview unavailable.",
+    external: "Preview unavailable.",
+  })[artifact.availability];
+}
+
+function formatBytes(value: number | null): string | null {
+  if (value === null) return null;
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = value / 1024;
+  let unit = units[0];
+  for (let index = 1; size >= 1024 && index < units.length; index += 1) {
+    size /= 1024;
+    unit = units[index];
+  }
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${unit}`;
 }
 
 function CommentThread({ thread, taskId, onChanged, onError }: { thread: TaskComment; taskId: string; onChanged: () => Promise<void>; onError: (message: string) => void }) {

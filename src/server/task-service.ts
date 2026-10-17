@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { assertDomain, DomainError } from "../domain/errors.js";
 import {
   documentFromSections,
   emptyDocument,
   plainTextFromDocument,
   type Actor,
+  type ArtifactReference,
   type CommentKind,
   type HandoffInput,
   type Project,
@@ -17,6 +18,7 @@ import {
   type TaskDetail,
   type TaskOutcome,
   type TaskOutput,
+  type TaskArtifact,
   type TaskStatus,
   type TaskSummary,
 } from "../domain/types.js";
@@ -106,6 +108,19 @@ function logoFromValues(
 }
 
 export const MAX_PROJECT_LOGO_BYTES = 256 * 1024;
+export const MAX_ARTIFACT_PREVIEW_BYTES = 50 * 1024 * 1024;
+
+const ARTIFACT_MEDIA_TYPES: Record<string, { mediaType: string; kind: TaskArtifact["previewKind"] }> = {
+  ".avif": { mediaType: "image/avif", kind: "image" },
+  ".gif": { mediaType: "image/gif", kind: "image" },
+  ".jpeg": { mediaType: "image/jpeg", kind: "image" },
+  ".jpg": { mediaType: "image/jpeg", kind: "image" },
+  ".png": { mediaType: "image/png", kind: "image" },
+  ".webp": { mediaType: "image/webp", kind: "image" },
+  ".mp4": { mediaType: "video/mp4", kind: "video" },
+  ".webm": { mediaType: "video/webm", kind: "video" },
+  ".pdf": { mediaType: "application/pdf", kind: "pdf" },
+};
 
 export class TaskService {
   constructor(private readonly database: AppDatabase) {}
@@ -443,7 +458,7 @@ export class TaskService {
     assertDomain(summary.length > 0 && summary.length <= 10_000, "Output summary must be 1–10,000 characters", "invalid_output");
     const validation = this.outputList(input.validation);
     const limitations = this.outputList(input.limitations);
-    const artifacts = this.outputList(input.artifacts);
+    const artifacts = this.artifactList(input.artifacts);
     const id = randomUUID();
     const createdAt = now();
     this.database.db.prepare(`
@@ -579,9 +594,10 @@ export class TaskService {
   }
 
   private outputsForTask(taskId: string): TaskOutput[] {
+    const task = this.getTaskRow(taskId);
     const rows = this.database.db.prepare("SELECT * FROM task_outputs WHERE task_id = ? ORDER BY created_at, rowid")
       .all(taskId) as OutputRow[];
-    return rows.map((row) => this.outputFromRow(row));
+    return rows.map((row) => this.outputFromRow(row, task.root_directory));
   }
 
   private relatedTasksForTask(taskId: string): RelatedTask[] {
@@ -607,24 +623,150 @@ export class TaskService {
   }
 
   private outputById(id: string): TaskOutput {
-    const row = this.database.db.prepare("SELECT * FROM task_outputs WHERE id = ?").get(id) as OutputRow | undefined;
+    const row = this.database.db.prepare(`
+      SELECT o.* FROM task_outputs o WHERE o.id = ?
+    `).get(id) as OutputRow | undefined;
     assertDomain(row, "Output not found", "output_not_found", 404);
-    return this.outputFromRow(row);
+    return this.outputFromRow(row, this.getTaskRow(row.task_id).root_directory);
   }
 
-  private outputFromRow(row: OutputRow): TaskOutput {
+  private outputFromRow(row: OutputRow, rootDirectory: string): TaskOutput {
+    const stored = JSON.parse(row.artifacts_json) as ArtifactReference[];
     return {
       id: row.id, taskId: row.task_id, summary: row.summary,
       validation: JSON.parse(row.validation_json) as string[], commit: row.commit_hash,
       limitations: JSON.parse(row.limitations_json) as string[], sessionId: row.session_id, runId: row.run_id,
-      artifacts: JSON.parse(row.artifacts_json) as string[], sourceCommentId: row.source_comment_id, createdAt: row.created_at,
+      artifacts: stored.map((artifact, index) => this.describeArtifact(row.task_id, row.id, index, artifact, rootDirectory)),
+      sourceCommentId: row.source_comment_id, createdAt: row.created_at,
     };
+  }
+
+  artifactFile(taskId: string, outputId: string, index: number): { path: string; filename: string; mediaType: string; size: number } {
+    const task = this.getTask(taskId);
+    const row = this.database.db.prepare("SELECT * FROM task_outputs WHERE id = ? AND task_id = ?")
+      .get(outputId, task.id) as OutputRow | undefined;
+    assertDomain(row, "Output not found", "output_not_found", 404);
+    const stored = JSON.parse(row.artifacts_json) as ArtifactReference[];
+    const reference = stored[index];
+    assertDomain(reference !== undefined, "Artifact not found", "artifact_not_found", 404);
+    const artifact = this.describeArtifact(task.id, row.id, index, reference, task.rootDirectory);
+    assertDomain(artifact.sourceType === "path", "Only local artifacts are served", "artifact_not_local", 400);
+    assertDomain(artifact.availability !== "outside_scope", "Artifact is outside the project root", "artifact_outside_scope", 403);
+    assertDomain(artifact.availability !== "missing", "Artifact is no longer available", "artifact_missing", 404);
+    assertDomain(artifact.availability !== "unsupported" && artifact.mediaType, "Artifact type is not supported", "artifact_unsupported", 415);
+    const path = realpathSync(this.localArtifactPath(task.rootDirectory, artifact.source));
+    return { path, filename: artifact.filename, mediaType: artifact.mediaType, size: artifact.size ?? statSync(path).size };
   }
 
   private outputList(values: string[] | undefined): string[] {
     const result = (values ?? []).map((value) => value.trim()).filter(Boolean);
     assertDomain(result.length <= 100 && result.every((value) => value.length <= 2_000), "Output lists are too long", "invalid_output");
     return result;
+  }
+
+  private artifactList(values: ArtifactReference[] | undefined): ArtifactReference[] {
+    const result = (values ?? []).map((value) => {
+      if (typeof value === "string") return value.trim();
+      return {
+        ...(value.path?.trim() ? { path: value.path.trim() } : {}),
+        ...(value.url?.trim() ? { url: value.url.trim() } : {}),
+        ...(value.filename?.trim() ? { filename: value.filename.trim() } : {}),
+        ...(value.mediaType?.trim() ? { mediaType: value.mediaType.trim().toLowerCase() } : {}),
+        ...(Number.isSafeInteger(value.size) && Number(value.size) >= 0 ? { size: Number(value.size) } : {}),
+      };
+    }).filter((value) => typeof value !== "string" || Boolean(value));
+    assertDomain(result.length <= 100, "Too many output artifacts", "invalid_output");
+    for (const value of result) {
+      const source = typeof value === "string" ? value : value.path ?? value.url;
+      assertDomain(Boolean(source) && String(source).length <= 2_000, "Artifact source is invalid", "invalid_output");
+      if (typeof value !== "string") {
+        assertDomain(Boolean(value.path) !== Boolean(value.url), "Artifact must have exactly one path or URL", "invalid_output");
+        assertDomain(!value.filename || value.filename.length <= 255, "Artifact filename is too long", "invalid_output");
+      }
+    }
+    return result;
+  }
+
+  private describeArtifact(
+    taskId: string,
+    outputId: string,
+    index: number,
+    reference: ArtifactReference,
+    rootDirectory: string,
+  ): TaskArtifact {
+    const value = typeof reference === "string" ? { path: reference } : reference;
+    const source = value.url ?? value.path ?? "";
+    const sourceType = value.url ? "url" : "path";
+    let filename = value.filename?.trim() || this.artifactFilename(source);
+    if (!filename) filename = "artifact";
+    const inferred = ARTIFACT_MEDIA_TYPES[extname(filename).toLowerCase()];
+    if (sourceType === "url") {
+      const validUrl = this.validHttpUrl(source);
+      const mediaType = value.mediaType?.toLowerCase() ?? inferred?.mediaType ?? null;
+      const kind = Object.values(ARTIFACT_MEDIA_TYPES).find((entry) => entry.mediaType === mediaType)?.kind ?? "none";
+      return {
+        source, sourceType, filename, mediaType, size: value.size ?? null, previewKind: kind,
+        availability: validUrl && kind !== "none" ? "external" : "unsupported",
+        previewUrl: validUrl && kind !== "none" ? source : null,
+      };
+    }
+    if (!this.pathWithinRoot(rootDirectory, source)) {
+      return { source, sourceType, filename, mediaType: null, size: null, previewKind: "none", availability: "outside_scope", previewUrl: null };
+    }
+    const localType = ARTIFACT_MEDIA_TYPES[extname(source).toLowerCase()];
+    const path = this.localArtifactPath(rootDirectory, source);
+    if (!existsSync(path)) {
+      return { source, sourceType, filename, mediaType: localType?.mediaType ?? null, size: null, previewKind: "none", availability: "missing", previewUrl: null };
+    }
+    let stats;
+    try { stats = statSync(path); }
+    catch { return { source, sourceType, filename, mediaType: localType?.mediaType ?? null, size: null, previewKind: "none", availability: "missing", previewUrl: null }; }
+    if (!stats.isFile() || !localType) {
+      return { source, sourceType, filename, mediaType: localType?.mediaType ?? null, size: stats.isFile() ? stats.size : null, previewKind: "none", availability: "unsupported", previewUrl: null };
+    }
+    const previewUrl = `/api/tasks/${encodeURIComponent(taskId)}/outputs/${encodeURIComponent(outputId)}/artifacts/${index}`;
+    return {
+      source, sourceType, filename, mediaType: localType.mediaType, size: stats.size,
+      previewKind: stats.size > MAX_ARTIFACT_PREVIEW_BYTES ? "none" : localType.kind,
+      availability: stats.size > MAX_ARTIFACT_PREVIEW_BYTES ? "too_large" : "available",
+      previewUrl,
+    };
+  }
+
+  private localArtifactPath(rootDirectory: string, source: string): string {
+    let root = rootDirectory;
+    try { root = realpathSync(rootDirectory); }
+    catch { /* Missing roots are handled as unavailable artifacts. */ }
+    return resolve(root, source);
+  }
+
+  private pathWithinRoot(rootDirectory: string, source: string): boolean {
+    let root;
+    try { root = realpathSync(rootDirectory); }
+    catch { return false; }
+    const candidate = this.localArtifactPath(rootDirectory, source);
+    const lexical = relative(root, candidate);
+    if (lexical.startsWith("..") || isAbsolute(lexical)) return false;
+    if (!existsSync(candidate)) return true;
+    const actual = realpathSync(candidate);
+    const resolved = relative(root, actual);
+    return !resolved.startsWith("..") && !isAbsolute(resolved);
+  }
+
+  private artifactFilename(source: string): string {
+    try { return basename(new URL(source).pathname) || "artifact"; }
+    catch { return basename(source); }
+  }
+
+  private validHttpUrl(value: string): boolean {
+    try { return ["http:", "https:"].includes(new URL(value).protocol); }
+    catch { return false; }
+  }
+
+  private getTaskRow(idOrHumanId: string): TaskRow {
+    const row = this.database.db.prepare(`${this.taskSelect()} WHERE t.id = ? OR t.human_id = ?`).get(idOrHumanId, idOrHumanId) as TaskRow | undefined;
+    assertDomain(row, "Task not found", "task_not_found", 404);
+    return row;
   }
 
   private commentFromRow(row: CommentRow): TaskComment {
