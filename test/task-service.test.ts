@@ -43,7 +43,7 @@ test("enforces the agreed workflow and explicit Codex closure", () => {
     assert.throws(() => tasks.transition(task.id, { to: "in_progress" }, "codex"), /Cannot move backlog/);
     tasks.transition(task.id, { to: "todo" }, "user");
     tasks.transition(task.id, { to: "in_progress" }, "codex");
-    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM notification_outbox WHERE event_type = 'started'").get().count, 1);
+    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM notification_outbox").get().count, 0);
     tasks.submitForReview(task.id, { sessionId: "session-1", summary: "Implemented", validation: ["Tests passed"] }, "codex");
     const reviewed = tasks.getTask(task.id);
     assert.equal(reviewed.status, "in_review");
@@ -57,6 +57,22 @@ test("enforces the agreed workflow and explicit Codex closure", () => {
     }, "codex");
     assert.equal(closed.outcome, "completed");
     assert.throws(() => tasks.transition(task.id, { to: "todo" }, "user"), /Cannot move closed/);
+  } finally { database.close(); }
+});
+
+test("task lifecycle and response-required comments do not queue Qahwa Notify alerts", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    const task = tasks.createTask({ projectId: project.id, title: "Quiet workflow", status: "todo" }, "codex");
+    tasks.transition(task.id, { to: "in_progress" }, "codex");
+    const comment = tasks.addComment(task.id, {
+      body: documentFromPlainText("Please confirm the result"), requiresResponse: true,
+    }, "codex");
+    assert.equal(comment.requiresResponse, true);
+    assert.equal(tasks.getTask(task.id).comments[0]?.plainText, "Please confirm the result");
+    tasks.submitForReview(task.id, { summary: "Ready for review" }, "codex");
+    assert.equal(tasks.getTask(task.id).status, "in_review");
+    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM notification_outbox").get().count, 0);
   } finally { database.close(); }
 });
 

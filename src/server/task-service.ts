@@ -376,8 +376,6 @@ export class TaskService {
       taskId: task.id, projectId: task.projectId, actor, eventType: "task.status_changed",
       details: { from: task.status, to: input.to, outcome, explicitUserInstruction: input.explicitUserInstruction },
     });
-    if (actor === "codex" && task.status === "todo" && input.to === "in_progress") this.enqueueNotification(task, "started");
-    if (actor === "codex" && task.status === "in_progress" && input.to === "in_review") this.enqueueNotification(task, "review");
     return this.getTask(task.id);
   }
 
@@ -433,7 +431,6 @@ export class TaskService {
       input.requiresResponse ? 1 : 0, input.metadata ? JSON.stringify(input.metadata) : null, timestamp, timestamp,
     );
     this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "comment.created", details: { commentId: id } });
-    if (actor === "codex" && input.requiresResponse) this.enqueueNotification(task, "response_required");
     return this.commentById(id);
   }
 
@@ -897,15 +894,5 @@ export class TaskService {
     this.database.db.prepare(`
       INSERT INTO activity (task_id, project_id, actor, event_type, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?)
     `).run(input.taskId ?? null, input.projectId ?? null, input.actor, input.eventType, input.details ? JSON.stringify(input.details) : null, now());
-  }
-
-  private enqueueNotification(task: TaskSummary, eventType: "started" | "review" | "response_required"): void {
-    const id = randomUUID();
-    this.database.db.prepare(`
-      INSERT INTO notification_outbox (id, event_type, task_id, payload_json, next_attempt_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, eventType, task.id, JSON.stringify({
-      taskHumanId: task.humanId, taskTitle: task.title, projectName: task.projectName,
-    }), now(), now());
   }
 }

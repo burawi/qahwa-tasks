@@ -39,3 +39,9 @@ Coding outputs may carry a commit proposal containing the exact repository root,
 Approval is handled directly by the authenticated backend. It rechecks the repository revision and a stored snapshot of every reviewed file, builds the commit with an isolated temporary Git index, and atomically advances `HEAD` only from the reviewed base. Unrelated staged and dirty files are preserved and excluded; Git hooks are disabled for this backend action. The action never starts Codex, pushes, publishes, or deploys.
 
 After a successful commit, Qahwa Tasks creates or updates the project's single active `Publish/deploy changes` Todo, appends the commit and release note, and relates it to the approved source task. Publication and deployment still require separate explicit instructions.
+
+## Notifications
+
+Qahwa Tasks does not send automatic Qahwa Notify alerts for task starts, review submissions, or comments requiring a response. Task status, outputs, and response-required comments remain available in the app. The server and MCP do not process the legacy notification outbox, so previously queued alerts are not sent on startup.
+
+The explicitly invoked `npm run auth:send-setup-link` command can still send an account setup link through Qahwa Notify using `QAHWA_NOTIFY_URL` and `QAHWA_NOTIFY_TOKEN_FILE`.

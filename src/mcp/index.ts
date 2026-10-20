@@ -4,15 +4,12 @@ import { z } from "zod";
 import { documentFromPlainText, documentFromSections, plainTextFromDocument } from "../domain/types.js";
 import { loadConfig } from "../server/config.js";
 import { AppDatabase } from "../server/database.js";
-import { NotificationWorker } from "../server/notification-worker.js";
-import { QahwaNotifier } from "../server/notifier.js";
 import { TaskService } from "../server/task-service.js";
 import { addRelatedTask, removeRelatedTask, returnTaskToWork } from "./workflow.js";
 
 const config = loadConfig();
 const database = new AppDatabase(config);
 const tasks = new TaskService(database);
-const notifications = new NotificationWorker(database, new QahwaNotifier(config));
 const server = new McpServer({ name: "qahwa-tasks", version: "1.0.0" });
 
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -128,20 +125,18 @@ server.registerTool("move_to_todo", {
 }, ({ taskId }) => text(compactTask(tasks.transition(taskId, { to: "todo" }, "codex"))));
 
 server.registerTool("start_task", {
-  description: "Move a Todo task to in-progress immediately before beginning work. This queues a Qahwa Notify alert.",
+  description: "Move a Todo task to in-progress immediately before beginning work.",
   inputSchema: { taskId: z.string() },
 }, async ({ taskId }) => {
   const result = tasks.transition(taskId, { to: "in_progress" }, "codex");
-  await notifications.process();
   return text(compactTask(result));
 });
 
 server.registerTool("add_comment", {
-  description: "Add a Codex comment or reply. Set requiresResponse only when the user must answer or approve; that setting sends a notification.",
+  description: "Add a Codex comment or reply. Set requiresResponse only when the user must answer or approve.",
   inputSchema: { taskId: z.string(), text: z.string().min(1), parentId: z.string().optional(), requiresResponse: z.boolean().optional() },
 }, async ({ taskId, text: body, parentId, requiresResponse }) => {
   const result = tasks.addComment(taskId, { body: documentFromPlainText(body), parentId, requiresResponse }, "codex");
-  if (requiresResponse) await notifications.process();
   return text({ id: result.id, text: result.plainText, requiresResponse: result.requiresResponse });
 });
 
@@ -163,7 +158,7 @@ server.registerTool("remove_related_task", {
 }, ({ taskId, relatedTaskId }) => text(compactTask(removeRelatedTask(tasks, taskId, relatedTaskId))));
 
 server.registerTool("submit_for_review", {
-  description: "Append a structured Codex output and move an in-progress task to in-review. This queues a Qahwa Notify alert.",
+  description: "Append a structured Codex output and move an in-progress task to in-review.",
   inputSchema: {
     taskId: z.string(), sessionId: z.string().optional(), runId: z.string().optional(), summary: z.string().min(1),
     validation: z.array(z.string()).optional(), commit: z.string().optional(), limitations: z.array(z.string()).optional(),
@@ -175,7 +170,6 @@ server.registerTool("submit_for_review", {
     sessionId: sessionId ?? process.env.CODEX_THREAD_ID, runId, summary, validation, commit, limitations, artifacts,
     commitProposal,
   }, "codex");
-  await notifications.process();
   return text(compactTask(result));
 });
 
