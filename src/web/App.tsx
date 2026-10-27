@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Link2, ListTodo, MonitorSmartphone, Network, Plus, Settings2, ShieldCheck, WifiOff } from "lucide-react";
+import { Archive, ArrowLeft, Check, ChevronDown, Link2, ListTodo, MonitorSmartphone, Network, Plus, Settings2, ShieldCheck, WifiOff } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { Project, TaskSummary } from "../domain/types";
 import { api, connection, type ConnectionState } from "./api";
@@ -11,12 +11,12 @@ const ProjectManager = lazy(() => import("./components/ProjectManager").then((mo
 const SessionWorkspace = lazy(() => import("./components/SessionWorkspace").then((module) => ({ default: module.SessionWorkspace })));
 
 type View = "tasks" | "orchestrator";
-type Scope = "all" | "active" | "closed";
+type Scope = "active" | "closed";
 
 export function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>(connection.state());
   const [view, setView] = useState<View>(() => window.location.pathname === "/orchestrator" ? "orchestrator" : "tasks");
-  const [scope, setScope] = useState<Scope>("all");
+  const [scope, setScope] = useState<Scope>("active");
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
@@ -85,12 +85,12 @@ export function App() {
         <div className="project-filter">{selectedProject && <ProjectLogo logo={selectedProject.logo} prefix={selectedProject.prefix} size="small" />}
           <select aria-label="Filter by project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All projects</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><ChevronDown />
         </div>
-        <div className="scope-tabs">{(["all", "active", "closed"] as Scope[]).map((value) => <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{value}</button>)}</div>
-        <span className="task-count">{tasks.length} {tasks.length === 1 ? "task" : "tasks"}</span>
+        <button type="button" className={`archive-toggle${scope === "closed" ? " active" : ""}`} onClick={() => setScope(scope === "closed" ? "active" : "closed")} aria-label={scope === "closed" ? "Return to active tasks" : "Open completed task history"} title={scope === "closed" ? "Back to tasks" : "Completed task history"}>{scope === "closed" ? <ArrowLeft /> : <Archive />}<span>{scope === "closed" ? "Tasks" : "History"}</span></button>
+        <span className="task-count">{tasks.length} {scope === "closed" ? "completed" : tasks.length === 1 ? "task" : "tasks"}</span>
         {activeProjects.length > 0 && <button type="button" className="primary desktop-create" onClick={() => setShowCreate(true)}><Plus />New task</button>}
       </section>
       <div className="task-rows">{tasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => openTask(task)} />)}</div>
-      {tasks.length === 0 && <div className="empty-state refined-empty"><span><Check /></span><h2>{scope === "all" && !projectId ? "A clear workspace" : "Nothing here yet"}</h2><p>{scope === "all" && !projectId ? "Add a quick note. Its session will help shape the work when you start it." : "No tasks match these filters."}</p>{scope === "all" && activeProjects.length > 0 && <button type="button" className="primary" onClick={() => setShowCreate(true)}><Plus />Create your first task</button>}</div>}
+      {tasks.length === 0 && <div className="empty-state refined-empty"><span><Check /></span><h2>{scope === "closed" ? "No completed tasks" : !projectId ? "A clear workspace" : "Nothing here yet"}</h2><p>{scope === "closed" ? "Completed work will stay quietly available here." : !projectId ? "Add a quick note. Its session will help shape the work when you start it." : "No tasks match this project."}</p>{scope === "active" && activeProjects.length > 0 && <button type="button" className="primary" onClick={() => setShowCreate(true)}><Plus />Create your first task</button>}</div>}
     </main> : <Suspense fallback={<div className="screen-loading">Loading session…</div>}><SessionWorkspace mode="orchestrator" onError={fail} onChanged={() => void loadTasks()} /></Suspense>}
 
     {view === "tasks" && activeProjects.length > 0 && <button type="button" className="fab" onClick={() => setShowCreate(true)}><Plus /><span>New task</span></button>}
@@ -98,7 +98,7 @@ export function App() {
 
     <Suspense fallback={<div className="screen-loading">Loading…</div>}>
       {showCreate && <CreateTask projects={activeProjects} initialProjectId={preferredCreateProjectId(activeProjects, lastCreateProjectId, projectId)} onCancel={() => setShowCreate(false)} onProjectChange={(id) => { writeLastCreateProjectId(id); setLastCreateProjectId(id); }} onSave={async (value) => {
-        try { const created = await api.createTask(value); writeLastCreateProjectId(value.projectId); setLastCreateProjectId(value.projectId); setShowCreate(false); setScope("all"); await loadTasks(); window.setTimeout(() => document.querySelector(`[data-task-id="${created.task.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80); }
+        try { const created = await api.createTask(value); writeLastCreateProjectId(value.projectId); setLastCreateProjectId(value.projectId); setShowCreate(false); setScope("active"); await loadTasks(); window.setTimeout(() => document.querySelector(`[data-task-id="${created.task.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80); }
         catch (error) { handleError(error); }
       }} />}
       {showProjects && <ProjectManager onClose={() => setShowProjects(false)} onChanged={() => void refresh()} onError={fail} />}

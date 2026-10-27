@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasCurrentUserAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
+import { buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
   const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
@@ -53,6 +53,35 @@ test("orchestrator actions require evidence from the current user turn, not keyw
   assert.equal(hasCurrentUserAuthorization("make the first one only", "the first one"), true);
   assert.equal(hasCurrentUserAuthorization("How would you handle them?", "start"), false);
   assert.equal(hasCurrentUserAuthorization(undefined, "Retry"), false);
+});
+
+test("standing directives authorize only their exact id and source quote", () => {
+  const directive = { id: "directive-1", instruction: "Continue priority work when capacity is safe", sourceQuote: "continue the work once this task is done", createdAt: "2026-10-27T00:00:00.000Z" };
+  assert.equal(hasStandingDirectiveAuthorization(directive, "directive-1", "continue the work"), true);
+  assert.equal(hasStandingDirectiveAuthorization(directive, "directive-2", "continue the work"), false);
+  assert.equal(hasStandingDirectiveAuthorization(directive, "directive-1", "deploy everything"), false);
+});
+
+test("implementation handoff preserves clarified scope and blocks unrelated work", () => {
+  const handoff = buildTaskImplementationHandoff({
+    humanId: "WAS-0004", projectName: "Wassala", title: "Count distinct customer phone numbers",
+    description: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Count all lifetime customer and recipient numbers" }] }] },
+  }, [
+    { role: "user", body: "Include customers and outbound order recipients." },
+    { role: "assistant", body: "Confirmed: lifetime, every status, with a source breakdown." },
+  ]);
+  assert.match(handoff, /Count distinct customer phone numbers/);
+  assert.match(handoff, /Include customers and outbound order recipients/);
+  assert.match(handoff, /read-only by default/);
+  assert.match(handoff, /Do not substitute adjacent work/);
+});
+
+test("orchestrator envelope can manage and use a standing directive", () => {
+  const response = parseAgentEnvelope(`<!-- qahwa-actions:[{"type":"directive","enabled":true,"instruction":"Continue prioritized work when capacity is safe","authorization":"continue the work"},{"type":"start","taskId":"was-0001","authorization":"continue the work","directiveId":"directive-1"}] -->`);
+  assert.deepEqual(response.actions, [
+    { type: "directive", enabled: true, instruction: "Continue prioritized work when capacity is safe", authorization: "continue the work" },
+    { type: "start", taskId: "WAS-0001", authorization: "continue the work", directiveId: "directive-1" },
+  ]);
 });
 
 test("session events become useful Orca-style work activities without protocol noise", () => {

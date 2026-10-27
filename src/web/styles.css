@@ -509,9 +509,9 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .task-toolbar .project-filter { grid-column: 1 / -1; position: relative; min-height: 46px; padding: 0 40px 0 13px; border-radius: 14px; box-shadow: 0 1px 0 rgb(255 255 255 / 60%); }
 .task-toolbar .project-filter select { min-height: 44px; padding: 0 4px; appearance: none; font-weight: 700; }
 .task-toolbar .project-filter > svg { position: absolute; right: 13px; width: 16px; color: var(--muted); pointer-events: none; }
-.scope-tabs { min-height: 40px; padding: 3px; border: 0; border-radius: 13px; background: var(--surface-2); }
-.scope-tabs button { padding: 7px 13px; font-size: 12px; }
-.scope-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 5px rgb(35 29 21 / 9%); }
+.archive-toggle { width: fit-content; min-height: 34px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
+.archive-toggle:hover, .archive-toggle.active { background: var(--surface-2); color: var(--text); }
+.archive-toggle svg { width: 15px; height: 15px; }
 .task-count { justify-self: end; color: var(--muted); font-size: 12px; }
 .task-rows { gap: 10px; }
 .task-row { --tone: var(--muted); min-height: 94px; padding: 16px 14px 16px 17px; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; border: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 19px; background: var(--surface) !important; box-shadow: var(--shadow-soft); cursor: pointer; transform: translateZ(0); }

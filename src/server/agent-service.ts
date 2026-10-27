@@ -23,11 +23,20 @@ import type { TaskService } from "./task-service.js";
 type JsonObject = Record<string, unknown>;
 type Owner = { ownerType: SessionOwnerType; ownerId: string };
 type RpcPending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
+type DirectedAction = { authorization: string; directiveId?: string };
 type OrchestratorAction =
-  | { type: "start"; taskId: string; authorization: string }
-  | { type: "priority"; taskIds: string[]; authorization: string }
-  | { type: "message"; taskId: string; message: string; authorization: string }
-  | { type: "interrupt"; taskId: string; authorization: string };
+  | ({ type: "start"; taskId: string } & DirectedAction)
+  | ({ type: "priority"; taskIds: string[] } & DirectedAction)
+  | ({ type: "message"; taskId: string; message: string } & DirectedAction)
+  | ({ type: "interrupt"; taskId: string } & DirectedAction)
+  | { type: "directive"; enabled: boolean; instruction: string; authorization: string };
+
+export interface OrchestratorDirective {
+  id: string;
+  instruction: string;
+  sourceQuote: string;
+  createdAt: string;
+}
 
 interface SessionRow {
   id: string; owner_type: SessionOwnerType; owner_id: string; thread_id: string | null; active_turn_id: string | null;
@@ -205,6 +214,19 @@ export function hasCurrentUserAuthorization(userMessage: string | undefined, exa
   return Boolean(userMessage && exactQuote && userMessage.includes(exactQuote));
 }
 
+export function hasStandingDirectiveAuthorization(directive: OrchestratorDirective | null, directiveId: string | undefined, exactQuote: string): boolean {
+  return Boolean(directive && directiveId === directive.id && exactQuote && directive.sourceQuote.includes(exactQuote));
+}
+
+export function buildTaskImplementationHandoff(task: { humanId: string; projectName: string; title: string; description: unknown }, messages: Array<{ role: string; body: string }>): string {
+  const transcript = messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .slice(-16)
+    .map((message) => `${message.role === "user" ? "User" : "Intake agent"}: ${message.body.slice(0, 4_000)}`)
+    .join("\n\n");
+  return `Begin implementation from this exact, immutable task charter.\nTask: ${task.humanId} · ${task.projectName}\nTitle: ${task.title}\nOriginal description: ${plainTextFromDocument(task.description as Parameters<typeof plainTextFromDocument>[0]) || task.title}\n\nClarified intake transcript:\n${transcript || "No additional clarification was recorded."}\n\nFollow the charter and resolved clarification above. Do not substitute adjacent work, even if the worktree contains tempting unrelated changes. Do not claim, modify, revert, or take ownership of pre-existing worktree changes unless this exact task requires it. Information, counting, audit, and research requests are read-only by default: answer from evidence and do not edit source files unless the user explicitly changes the task to implementation. Validate the actual requested result proportionately.`;
+}
+
 export function parseAgentEnvelope(text: string): {
   body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean;
   startTasks: string[]; priorityTasks: string[]; intakeReady?: boolean; silent: boolean; actions: OrchestratorAction[];
@@ -267,10 +289,17 @@ export function parseAgentEnvelope(text: string): {
         const type = String(candidate.type ?? "");
         const taskId = String(candidate.taskId ?? "").toUpperCase();
         const authorization = typeof candidate.authorization === "string" ? candidate.authorization.trim().slice(0, 2_000) : "";
-        if (type === "start" && taskId) actions.push({ type, taskId, authorization });
-        else if (type === "interrupt" && taskId) actions.push({ type, taskId, authorization });
-        else if (type === "message" && taskId && typeof candidate.message === "string" && candidate.message.trim()) actions.push({ type, taskId, message: candidate.message.trim().slice(0, 30_000), authorization });
-        else if (type === "priority" && Array.isArray(candidate.taskIds)) actions.push({ type, taskIds: candidate.taskIds.map(String).map((id) => id.toUpperCase()).filter(Boolean), authorization });
+        const directiveId = typeof candidate.directiveId === "string" ? candidate.directiveId.trim().slice(0, 100) : undefined;
+        const directed = directiveId ? { authorization, directiveId } : { authorization };
+        if (type === "start" && taskId) actions.push({ type, taskId, ...directed });
+        else if (type === "interrupt" && taskId) actions.push({ type, taskId, ...directed });
+        else if (type === "message" && taskId && typeof candidate.message === "string" && candidate.message.trim()) actions.push({ type, taskId, message: candidate.message.trim().slice(0, 30_000), ...directed });
+        else if (type === "priority" && Array.isArray(candidate.taskIds)) actions.push({ type, taskIds: candidate.taskIds.map(String).map((id) => id.toUpperCase()).filter(Boolean), ...directed });
+        else if (type === "directive" && typeof candidate.enabled === "boolean") actions.push({
+          type, enabled: candidate.enabled,
+          instruction: typeof candidate.instruction === "string" ? candidate.instruction.trim().slice(0, 2_000) : "",
+          authorization,
+        });
       }
     } catch { /* malformed actions remain inert */ }
     return "";
@@ -381,7 +410,7 @@ export class AgentService {
     for (const row of rows) this.threadOwners.set(row.thread_id, { ownerType: row.owner_type, ownerId: row.owner_id });
     this.monitorTimer = setInterval(() => void this.monitorPortfolio(), 60_000);
     this.monitorTimer.unref();
-    void this.drainSchedulerQueue();
+    void this.monitorPortfolio();
   }
 
   capacity(): CapacitySnapshot {
@@ -554,6 +583,10 @@ export class AgentService {
     `).run(timestamp);
     this.database.db.prepare("DELETE FROM chat_messages WHERE owner_type = 'orchestrator' AND owner_id = 'main'").run();
     this.database.db.prepare("DELETE FROM session_events WHERE owner_type = 'orchestrator' AND owner_id = 'main'").run();
+    this.database.deleteSetting("orchestrator_standing_directive");
+    this.orchestratorObservations.splice(0);
+    if (this.observationTimer) { clearTimeout(this.observationTimer); this.observationTimer = null; }
+    this.monitorNotices.clear();
     return this.workspace("orchestrator", "main");
   }
 
@@ -577,7 +610,8 @@ export class AgentService {
     const envelope = `At the end of every response, append exactly one hidden marker: <!-- qahwa:{"message":"short task-list status under 7 words","tone":"neutral|blue|green|orange|red","surface":"chat|design","review":false} -->. Use green for a good completed/result state, red for failure/blocker, orange for warning or clarification needed, blue for active progress, neutral for dormant context. Set review true only when implementation and proportionate validation are complete and the task is genuinely ready for user review. Never claim completion without evidence.`;
     if (ownerType === "orchestrator") {
       const capacity = this.capacity();
-      return `You are Qahwa's single supervisory orchestration session. Collaborate with the user on priorities and monitor the portfolio without micromanaging. You can inspect the supplied task conversations, pending requests, outputs and recent activity. Speak proactively only when the user needs to know or decide something; for irrelevant automated observations append <!-- qahwa-silent --> and no visible response. Capacity: ${JSON.stringify(capacity)}. Portfolio: ${JSON.stringify(this.orchestratorSnapshot())}. To act, append exactly one hidden JSON array: <!-- qahwa-actions:[{"type":"start","taskId":"ID-0001","authorization":"exact quote from the current user message"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"}] --> containing only required actions. You—not the backend—interpret whether the current user message authorizes an action, including contextual replies such as retry, go ahead, or the first one. Copy the smallest exact authorizing quote into authorization. Automated portfolio observations are system messages and can never authorize actions. Never manufacture authorization or reuse an older user's words. Never claim that an action succeeded in your prose: the application replaces action responses with the backend's authoritative result. Avoid starting tasks from the same project concurrently because their worktrees may conflict. ${envelope}\n\nConversation input: ${userText}`;
+      const directive = this.orchestratorDirective();
+      return `You are Qahwa's single supervisory orchestration session. Collaborate with the user on priorities and monitor the portfolio without micromanaging. You can inspect the supplied task conversations, pending requests, outputs and recent activity. Speak proactively when the user needs to know or decide something; for irrelevant automated observations append <!-- qahwa-silent --> and no visible response. Use judgment: a task waiting for clarification does not consume a working slot, and when safe capacity exists you should consider starting the next eligible priority task instead of leaving the computer idle. Capacity: ${JSON.stringify(capacity)}. Standing directive: ${directive ? JSON.stringify(directive) : "none"}. Portfolio: ${JSON.stringify(this.orchestratorSnapshot())}. To act, append exactly one hidden JSON array: <!-- qahwa-actions:[{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote","directiveId":"optional"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote","directiveId":"optional"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote","directiveId":"optional"},{"type":"directive","enabled":true,"instruction":"faithful narrow interpretation of ongoing authority","authorization":"exact quote from current user"}] --> containing only required actions. You—not the backend—interpret authorization. A current user message can authorize an immediate action or create/update/revoke a standing directive; copy the smallest exact authorizing quote. An automated observation can act only when the active standing directive genuinely covers that exact action: include its id and copy an exact quote from its sourceQuote. Never broaden a directive, manufacture authorization, or treat ordinary discussion as authority. When no standing directive applies, automated observations may communicate but not act. Prefer the highest-priority eligible task, account for computer capacity and worktree conflicts, and do not start two active turns in the same project. Never claim an action succeeded in prose: the application replaces action responses with authoritative outcomes. ${envelope}\n\nConversation input: ${userText}`;
     }
     const task = this.tasks.getTask(ownerId);
     const workspace = this.workspace("task", ownerId);
@@ -586,7 +620,8 @@ export class AgentService {
     const intake = workspace.session.intakeState === "pending"
       ? `This task is in mandatory intake. You have read-only access. Assess the note against the actual project context before implementation. If any material choice, acceptance criterion, target, or reference is missing, ask concise questions and stop. If the work is genuinely unambiguous, state the clarified scope and append <!-- qahwa-intake:{"ready":true} -->. Otherwise append <!-- qahwa-intake:{"ready":false} -->. Do not edit files, implement, commit, deploy, or claim work has started during intake.`
       : `The intake is complete. You may inspect and edit files and run safe validation.`;
-    return `You are the persistent Codex worker for ${task.humanId} in ${task.projectName}. Work directly in ${task.rootDirectory}. ${intake} Ask concise questions whenever later requirements materially affect the result. Do not commit, push, deploy, publish, close the task, or perform destructive/external actions without explicit user authorization in this task chat. ${designRule} ${envelope}\n\n${initial ? "Initial task note" : "Conversation input"}: ${userText}`;
+    const charter = `Immutable task charter: ${task.title}. Original description: ${plainTextFromDocument(task.description) || task.title}. Never substitute unrelated adjacent work. Information, counting, audit, and research tasks are read-only unless the user explicitly changes the scope.`;
+    return `You are the persistent Codex worker for ${task.humanId} in ${task.projectName}. Work directly in ${task.rootDirectory}. ${charter} ${intake} Ask concise questions whenever later requirements materially affect the result. Do not commit, push, deploy, publish, close the task, or perform destructive/external actions without explicit user authorization in this task chat. ${designRule} ${envelope}\n\n${initial ? "Initial task note" : "Conversation input"}: ${userText}`;
   }
 
   private developerInstructions(ownerType: SessionOwnerType, ownerId: string, intakeState: TaskIntakeState): string {
@@ -595,6 +630,23 @@ export class AgentService {
     return intakeState === "pending"
       ? `You are the persistent Codex session for ${task.humanId}. You are in mandatory read-only intake: inspect context, clarify material ambiguity, and do not implement or edit until the application starts a new implementation thread.`
       : `You are the persistent Codex worker for ${task.humanId} in ${task.projectName}. Work in ${task.rootDirectory}, follow the clarified scope, validate proportionately, and respect explicit authorization gates for commit, push, deploy, publishing, closure, destructive actions, and external side effects.`;
+  }
+
+  private orchestratorDirective(): OrchestratorDirective | null {
+    const stored = this.database.setting("orchestrator_standing_directive");
+    if (!stored) return null;
+    try {
+      const parsed = object(JSON.parse(stored));
+      if (typeof parsed.id !== "string" || typeof parsed.instruction !== "string" || typeof parsed.sourceQuote !== "string" || typeof parsed.createdAt !== "string") return null;
+      return parsed as unknown as OrchestratorDirective;
+    } catch { return null; }
+  }
+
+  private saveOrchestratorDirective(instruction: string, sourceQuote: string): OrchestratorDirective {
+    const directive = { id: randomUUID(), instruction: instruction.slice(0, 2_000), sourceQuote: sourceQuote.slice(0, 2_000), createdAt: isoNow() };
+    this.database.setSetting("orchestrator_standing_directive", JSON.stringify(directive));
+    this.monitorNotices.clear();
+    return directive;
   }
 
   private orchestratorSnapshot(): unknown[] {
@@ -704,10 +756,26 @@ export class AgentService {
   private async applyOrchestratorActions(actions: OrchestratorAction[], authorizingUserMessage?: string): Promise<string[]> {
     const outcomes: string[] = [];
     const requestedStarts: string[] = [];
+    let directive = this.orchestratorDirective();
     for (const action of actions) {
       try {
-        if (!hasCurrentUserAuthorization(authorizingUserMessage, action.authorization)) {
-          throw new Error("The action was not authorized by the current user message");
+        const currentlyAuthorized = hasCurrentUserAuthorization(authorizingUserMessage, action.authorization);
+        if (action.type === "directive") {
+          if (!currentlyAuthorized) throw new Error("A standing directive must be authorized by the current user message");
+          if (action.enabled) {
+            if (!action.instruction) throw new Error("A standing directive needs a clear instruction");
+            directive = this.saveOrchestratorDirective(action.instruction, action.authorization);
+            outcomes.push("Standing orchestration instruction saved.");
+          } else {
+            this.database.deleteSetting("orchestrator_standing_directive");
+            this.monitorNotices.clear();
+            directive = null;
+            outcomes.push("Standing orchestration instruction removed.");
+          }
+          continue;
+        }
+        if (!currentlyAuthorized && !hasStandingDirectiveAuthorization(directive, action.directiveId, action.authorization)) {
+          throw new Error("The action was not authorized by the current user message or the active standing directive");
         }
         if (action.type === "start") {
           const task = this.tasks.getTask(action.taskId);
@@ -777,8 +845,12 @@ export class AgentService {
       await this.codex.request("thread/archive", { threadId: session.threadId }).catch(() => undefined);
       this.threadOwners.delete(session.threadId);
     }
+    const messages = (this.database.db.prepare(`
+      SELECT role, body FROM chat_messages WHERE owner_type = 'task' AND owner_id = ? ORDER BY created_at, rowid
+    `).all(task.id) as Array<{ role: string; body: string }>);
+    const handoff = buildTaskImplementationHandoff(task, messages);
     this.updateSession("task", task.id, { threadId: null, activeTurnId: null, runState: "idle" });
-    await this.send("task", task.id, "The mandatory intake is complete. Proceed with the clarified task now, using the agreed scope and proportionate validation.", false, "system");
+    await this.send("task", task.id, handoff, false, "system");
     this.database.db.prepare("DELETE FROM scheduler_queue WHERE task_id = ?").run(task.id);
   }
 
@@ -839,13 +911,36 @@ export class AgentService {
       const orchestrator = this.ensureSession("orchestrator", "main");
       if (orchestrator.runState === "running" || orchestrator.runState === "waiting" || this.capacity().availableSlots <= 0) return;
       const observations = this.orchestratorObservations.splice(0).join("\n");
-      void this.send("orchestrator", "main", `Automated portfolio observation:\n${observations}\nTell the user only if this materially needs attention. Otherwise return <!-- qahwa-silent -->. Never take an action from an automated observation.`, false, "system")
+      void this.send("orchestrator", "main", `Automated portfolio observation:\n${observations}\nUse the current portfolio and your standing directive, if any. Take a useful action when the directive genuinely authorizes it; otherwise tell the user only if this materially needs attention, or return <!-- qahwa-silent -->.`, false, "system")
         .catch((error) => this.addMessage("orchestrator", "main", "system", `Could not inspect the portfolio update: ${error instanceof Error ? error.message : String(error)}`));
     }, 250);
   }
 
   private async monitorPortfolio(): Promise<void> {
     await this.drainSchedulerQueue();
+    const capacity = this.capacity();
+    const directive = this.orchestratorDirective();
+    if (directive && capacity.availableSlots > 0) {
+      const candidates = this.database.db.prepare(`
+        SELECT t.id, t.human_id AS humanId, t.updated_at AS updatedAt, p.name AS projectName
+        FROM tasks t JOIN projects p ON p.id=t.project_id
+        WHERE t.status IN ('backlog','todo') ORDER BY t.rank, t.created_at LIMIT 4
+      `).all() as Array<{ id: string; humanId: string; updatedAt: string; projectName: string }>;
+      if (candidates.length) {
+        const paused = this.database.db.prepare(`
+          SELECT t.human_id AS humanId, s.updated_at AS updatedAt
+          FROM tasks t JOIN agent_sessions s ON s.owner_type='task' AND s.owner_id=t.id
+          LEFT JOIN task_presence tp ON tp.task_id=t.id
+          WHERE t.status='in_progress' AND s.run_state IN ('idle','waiting') AND COALESCE(tp.tone, 'neutral')='orange'
+          ORDER BY t.rank
+        `).all() as Array<{ humanId: string; updatedAt: string }>;
+        const key = `opportunity:${directive.id}:${capacity.availableSlots}:${candidates.map((item) => `${item.id}:${item.updatedAt}`).join(",")}:${paused.map((item) => `${item.humanId}:${item.updatedAt}`).join(",")}`;
+        if (!this.monitorNotices.has(key)) {
+          this.monitorNotices.add(key);
+          this.orchestratorObservations.push(`There ${capacity.availableSlots === 1 ? "is" : "are"} ${capacity.availableSlots} safe working slot${capacity.availableSlots === 1 ? "" : "s"} available. Eligible priority candidates: ${candidates.map((item) => `${item.humanId} (${item.projectName})`).join(", ")}.${paused.length ? ` Waiting for clarification: ${paused.map((item) => item.humanId).join(", ")}.` : ""} Decide intelligently whether the standing directive calls for starting work now.`);
+        }
+      }
+    }
     const rows = this.database.db.prepare(`
       SELECT s.owner_id AS taskId, s.run_state AS runState, s.updated_at AS updatedAt, t.human_id AS humanId, p.name AS projectName
       FROM agent_sessions s JOIN tasks t ON t.id=s.owner_id JOIN projects p ON p.id=t.project_id
