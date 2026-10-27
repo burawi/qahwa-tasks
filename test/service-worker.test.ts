@@ -48,7 +48,7 @@ test("pre-bundle guard recovers once and makes bootstrap failures visible", () =
   const source = readFileSync(new URL("../public/boot.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../src/web/index.html", import.meta.url), "utf8");
 
-  assert.match(html, /<script src="\/boot\.js\?v=10"><\/script>/);
+  assert.match(html, /<script src="\/boot\.js\?v=11"><\/script>/);
   assert.match(source, /api\/client-diagnostics/);
   assert.match(source, /getRegistrations/);
   assert.match(source, /qahwa-tasks-/);

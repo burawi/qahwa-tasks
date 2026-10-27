@@ -64,7 +64,6 @@ export function App() {
   const openTask = (task: TaskSummary) => { history.pushState({}, "", `/tasks/${task.humanId}`); setView("tasks"); setSelectedTask(task.humanId); };
   const selectView = (next: View) => { history.pushState({}, "", next === "orchestrator" ? "/orchestrator" : "/"); setSelectedTask(null); setView(next); };
 
-  const workingCount = tasks.filter((task) => task.sessionState === "running").length;
   return <div className="app-shell unified-shell">
     <header className="app-header unified-header">
       <button type="button" className="brand" onClick={() => selectView("tasks")} aria-label="Qahwa Tasks home"><span>Q</span><div><strong>Qahwa</strong><small>Tasks</small></div></button>
@@ -82,16 +81,13 @@ export function App() {
     {offline && <div className="offline-banner"><WifiOff />Offline · showing cached content</div>}
 
     {view === "tasks" ? <main className="unified-task-list">
-      <section className="tasks-heading">
-        <div><p className="eyebrow">Workspace</p><h1>{selectedProject?.name ?? "All tasks"}</h1><p>{workingCount ? `${workingCount} ${workingCount === 1 ? "session is" : "sessions are"} working now` : "Capture work, then start it when you are ready."}</p></div>
-        {activeProjects.length > 0 && <button type="button" className="primary desktop-create" onClick={() => setShowCreate(true)}><Plus />New task</button>}
-      </section>
       <section className="task-toolbar" aria-label="Task filters">
         <div className="project-filter">{selectedProject && <ProjectLogo logo={selectedProject.logo} prefix={selectedProject.prefix} size="small" />}
           <select aria-label="Filter by project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All projects</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><ChevronDown />
         </div>
         <div className="scope-tabs">{(["all", "active", "closed"] as Scope[]).map((value) => <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{value}</button>)}</div>
         <span className="task-count">{tasks.length} {tasks.length === 1 ? "task" : "tasks"}</span>
+        {activeProjects.length > 0 && <button type="button" className="primary desktop-create" onClick={() => setShowCreate(true)}><Plus />New task</button>}
       </section>
       <div className="task-rows">{tasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => openTask(task)} />)}</div>
       {tasks.length === 0 && <div className="empty-state refined-empty"><span><Check /></span><h2>{scope === "all" && !projectId ? "A clear workspace" : "Nothing here yet"}</h2><p>{scope === "all" && !projectId ? "Add a quick note. Its session will help shape the work when you start it." : "No tasks match these filters."}</p>{scope === "all" && activeProjects.length > 0 && <button type="button" className="primary" onClick={() => setShowCreate(true)}><Plus />Create your first task</button>}</div>}

@@ -473,11 +473,7 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
 .header-actions .icon-button { position: relative; }
 .live-dot { position: absolute; right: 7px; bottom: 7px; width: 8px; height: 8px; border: 2px solid var(--bg); border-radius: 50%; background: var(--green); }
 .desktop-tabs { display: none; }
-.unified-task-list { width: min(100%, 960px); margin: 0 auto; padding: 32px 18px 90px; }
-.tasks-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
-.tasks-heading h1 { margin: 1px 0 7px; font-size: clamp(30px, 7vw, 46px); line-height: 1; letter-spacing: -.055em; }
-.tasks-heading p { max-width: 540px; margin: 0; color: var(--muted); line-height: 1.5; }
-.tasks-heading .eyebrow, .eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .13em; text-transform: uppercase; }
+.unified-task-list { width: min(100%, 960px); margin: 0 auto; padding: 12px 14px 90px; }
 .desktop-create { display: none !important; white-space: nowrap; }
 .task-toolbar { margin-bottom: 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .task-toolbar .project-filter { grid-column: 1 / -1; position: relative; min-height: 46px; padding: 0 40px 0 13px; border-radius: 14px; box-shadow: 0 1px 0 rgb(255 255 255 / 60%); }
@@ -634,10 +630,9 @@ button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visi
   .desktop-tabs button svg { width: 16px; }
   .desktop-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 6px rgb(35 29 21 / 8%); }
   .bottom-tabs { display: none; }
-  .unified-task-list { padding: 58px 24px 80px; }
-  .tasks-heading { margin-bottom: 36px; }
+  .unified-task-list { padding: 24px 24px 80px; }
   .desktop-create { display: inline-flex !important; min-height: 48px !important; padding: 0 18px !important; border-radius: 15px !important; }
-  .task-toolbar { grid-template-columns: minmax(210px, 280px) auto 1fr; margin-bottom: 18px; }
+  .task-toolbar { grid-template-columns: minmax(210px, 280px) auto 1fr auto; margin-bottom: 18px; }
   .task-toolbar .project-filter { grid-column: auto; }
   .task-count { justify-self: end; }
   .task-row { min-height: 98px; padding: 17px 18px 17px 20px; }
