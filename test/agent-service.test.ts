@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isolatedCodexEnvironment, orchestratorAuthorizations, parseAgentEnvelope, recommendedParallelism } from "../src/server/agent-service.js";
+import { hasCurrentUserAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, recommendedParallelism } from "../src/server/agent-service.js";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
   const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
@@ -28,14 +28,14 @@ test("capacity recommendation protects small or memory-pressured machines", () =
 });
 
 test("agent envelope extracts intake, silent supervision, and structured orchestrator controls", () => {
-  const response = parseAgentEnvelope(`No user-facing update.\n<!-- qahwa-intake:{"ready":true} -->\n<!-- qahwa-silent -->\n<!-- qahwa-actions:[{"type":"start","taskId":"was-0001"},{"type":"message","taskId":"QAH-0002","message":"Check the failing test"},{"type":"interrupt","taskId":"MAJ-0003"},{"type":"priority","taskIds":["MAJ-0003","WAS-0001"]}] -->`);
+  const response = parseAgentEnvelope(`No user-facing update.\n<!-- qahwa-intake:{"ready":true} -->\n<!-- qahwa-silent -->\n<!-- qahwa-actions:[{"type":"start","taskId":"was-0001","authorization":"Retry"},{"type":"message","taskId":"QAH-0002","message":"Check the failing test","authorization":"guide it"},{"type":"interrupt","taskId":"MAJ-0003","authorization":"pause it"},{"type":"priority","taskIds":["MAJ-0003","WAS-0001"],"authorization":"use this order"}] -->`);
   assert.equal(response.intakeReady, true);
   assert.equal(response.silent, true);
   assert.deepEqual(response.actions, [
-    { type: "start", taskId: "WAS-0001" },
-    { type: "message", taskId: "QAH-0002", message: "Check the failing test" },
-    { type: "interrupt", taskId: "MAJ-0003" },
-    { type: "priority", taskIds: ["MAJ-0003", "WAS-0001"] },
+    { type: "start", taskId: "WAS-0001", authorization: "Retry" },
+    { type: "message", taskId: "QAH-0002", message: "Check the failing test", authorization: "guide it" },
+    { type: "interrupt", taskId: "MAJ-0003", authorization: "pause it" },
+    { type: "priority", taskIds: ["MAJ-0003", "WAS-0001"], authorization: "use this order" },
   ]);
 });
 
@@ -48,9 +48,9 @@ test("spawned Codex sessions cannot inherit Orca routing or parent session ident
   assert.deepEqual(environment, { PATH: "/bin" });
 });
 
-test("orchestrator recognizes contextual start authorization without authorizing system observations", () => {
-  assert.equal(orchestratorAuthorizations("make the first one in your list only").start, true);
-  assert.equal(orchestratorAuthorizations("go ahead").start, true);
-  assert.equal(orchestratorAuthorizations("How would you handle them?").start, false);
-  assert.deepEqual(orchestratorAuthorizations("start WAS-0004", false), { start: false, priority: false, control: false });
+test("orchestrator actions require evidence from the current user turn, not keyword interpretation", () => {
+  assert.equal(hasCurrentUserAuthorization("Retry", "Retry"), true);
+  assert.equal(hasCurrentUserAuthorization("make the first one only", "the first one"), true);
+  assert.equal(hasCurrentUserAuthorization("How would you handle them?", "start"), false);
+  assert.equal(hasCurrentUserAuthorization(undefined, "Retry"), false);
 });
