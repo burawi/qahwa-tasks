@@ -14,6 +14,7 @@
     "auth:set-password": "tsx src/scripts/set-password.ts",
     "auth:send-setup-link": "node dist/server/scripts/send-setup-link.js",
     "pair": "tsx src/scripts/create-pairing-link.ts",
+    "pair:production": "DATA_DIR=/home/burawi/.local/share/qahwa-tasks BACKUP_DIR=/home/burawi/.local/share/qahwa-tasks/backups PUBLIC_BASE_URL=https://tasks.qahwa.pro tsx src/scripts/create-pairing-link.ts",
     "import:qahwa-design": "tsx src/scripts/import-qahwa-design.ts",
     "backup": "tsx src/scripts/backup.ts",
     "test": "node --import tsx --test test/*.test.ts",

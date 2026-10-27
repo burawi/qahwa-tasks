@@ -34,7 +34,7 @@ The production service is designed for the existing Cloudflare Tunnel route at `
 The PWA requires the same one-time, server-identity-pinned pairing flow used by Qahwa Design. Create a link on the server:
 
 ```bash
-npm run pair
+npm run pair:production
 ```
 
 The link is written with mode `0600` under the configured data directory and expires after 15 minutes. Pairing links are server-created only; paired devices can be reviewed and revoked from Projects → Data & access.
