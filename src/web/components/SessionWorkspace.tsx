@@ -1,9 +1,9 @@
-import { ArrowLeft, Bot, Eraser, Expand, Info, Maximize2, Minus, Network, Pause, Play, Plus, RotateCcw, Save, Send, Shrink, Sparkles, UserRound, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, Bot, BrainCircuit, Check, ChevronDown, ChevronUp, CircleCheck, Code2, Eraser, Expand, FilePenLine, Info, LoaderCircle, Maximize2, Minus, Network, Pause, Play, Plus, RotateCcw, Save, Search, Send, Shrink, Sparkles, Terminal, UserRound, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import type { TaskDetail, TaskWorkspace } from "../../domain/types";
+import type { TaskDetail, TaskWorkspace, WorkActivity } from "../../domain/types";
 import { api } from "../api";
 
 const TaskDetailPanel = lazy(() => import("./TaskDetail").then((module) => ({ default: module.TaskDetail })));
@@ -44,7 +44,7 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
     const timer = window.setInterval(() => void load().catch(() => undefined), 1500);
     return () => window.clearInterval(timer);
   }, [mode, taskId]);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [workspace?.messages.length]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [workspace?.messages.length, workspace?.workActivities.at(-1)?.updatedAt]);
 
   const act = async (work: () => Promise<unknown>) => {
     setBusy(true);
@@ -99,7 +99,7 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
           img: ({ ...props }) => <a href={props.src} target="_blank" rel="noopener noreferrer external" onClick={(event) => { if (!props.src) return; event.preventDefault(); window.open(props.src, "_blank", "noopener,noreferrer"); }}><img {...props} loading="lazy" /></a>,
         }}>{entry.body}</ReactMarkdown></div></div>
       </article>)}
-      {running && <div className="working-indicator"><span /><span /><span />{workspace?.session.runState === "waiting" ? "Waiting for you" : "Working"}</div>}
+      {workspace && (workspace.workActivities.length > 0 || running) && <WorkLog activities={workspace.workActivities} running={running} waiting={workspace.session.runState === "waiting"} />}
       {workspace?.pendingRequests.map((pending) => <PendingCard key={pending.id} pending={pending} onResolve={(body) => void act(() => api.respondToRequest(pending.id, body))} />)}
       <div ref={endRef} />
     </div>
@@ -158,13 +158,48 @@ function DesignCanvas({ workspace, taskId, onSelect, onChanged, onError }: { wor
   const run = async (operation: () => Promise<unknown>) => { try { await operation(); setVersionId("current"); await onChanged(); } catch (error) { onError(error instanceof Error ? error.message : "Canvas action failed"); } };
   return <section className={`design-panel${fullscreen ? " fullscreen" : ""}`}>
     <header><div><strong>{document.artboard.name}</strong><small>Revision {displayedRevision} · {document.artboard.width}×{document.artboard.height}{selection ? ` · ${selection.split(":")[0]}` : ""}</small></div><div className="canvas-version-controls">{workspace.designVersions.length > 0 && <select aria-label="Canvas version" value={versionId} onChange={(event) => { setVersionId(event.target.value); setSelection(null); onSelect(null); }}><option value="current">Current</option>{workspace.designVersions.map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}</select>}<button type="button" onClick={() => { const name = window.prompt("Version name", `Revision ${displayedRevision}`); if (name) void run(() => api.createDesignVersion(taskId, name)); }} aria-label="Save version"><Save /></button>{versionId !== "current" && <button type="button" onClick={() => { if (window.confirm("Restore this version as the current canvas?")) void run(() => api.restoreDesignVersion(taskId, versionId)); }} aria-label="Restore version"><RotateCcw /></button>}</div><div className="canvas-controls"><button type="button" onClick={() => setZoom(Math.max(.25, zoom - .1))} aria-label="Zoom out"><Minus /></button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setZoom(Math.min(1.5, zoom + .1))} aria-label="Zoom in"><Plus /></button><button type="button" onClick={() => setZoom(.75)} aria-label="Fit canvas"><Maximize2 /></button><button type="button" onClick={() => setFullscreen(!fullscreen)} aria-label={fullscreen ? "Exit full canvas" : "Open full canvas"}>{fullscreen ? <Shrink /> : <Expand />}</button></div></header>
-    {workspace.session.runState === "running" && <div className="canvas-activity"><span /><span /><span />{humanizeEvent(workspace.recentEvents.at(-1)?.type ?? "Working on canvas")}</div>}
+    {workspace.session.runState === "running" && <div className="canvas-activity"><LoaderCircle />{workspace.workActivities.filter((item) => item.status === "running").at(-1)?.title ?? "Working on canvas"}</div>}
     <div className="design-stage" ref={stageRef}><iframe ref={frameRef} title={document.artboard.name} sandbox="allow-scripts" srcDoc={source} style={{ width: document.artboard.width * zoom, height: document.artboard.height * zoom }} /></div>
   </section>;
 }
 
-function humanizeEvent(value: string): string {
-  return value.replace(/[./_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+function WorkLog({ activities, running, waiting }: { activities: WorkActivity[]; running: boolean; waiting: boolean }) {
+  const [expanded, setExpanded] = useState(running);
+  useEffect(() => { if (running) setExpanded(true); }, [running]);
+  const hasError = activities.some((item) => item.status === "error");
+  const heading = waiting ? "Waiting for you" : running ? "Codex is working" : hasError ? "Work finished with issues" : "Work completed";
+  return <section className={`work-log ${running ? "active" : hasError ? "error" : "complete"}`} aria-live="polite">
+    <button className="work-log-summary" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+      <span className="work-log-orb">{running && !waiting ? <LoaderCircle className="spin" /> : hasError ? <AlertCircle /> : <CircleCheck />}</span>
+      <span><strong>{heading}</strong><small>{activities.length ? `${activities.length} ${activities.length === 1 ? "activity" : "activities"}` : "Preparing the first step"}</small></span>
+      {expanded ? <ChevronUp /> : <ChevronDown />}
+    </button>
+    {expanded && activities.length > 0 && <div className="work-log-list">{activities.map((item) => <WorkItem key={item.id} item={item} />)}</div>}
+  </section>;
+}
+
+function WorkItem({ item }: { item: WorkActivity }) {
+  const [open, setOpen] = useState(item.status === "running");
+  const hasDetails = Boolean(item.detail || item.context);
+  useEffect(() => { if (item.status === "running") setOpen(true); }, [item.status]);
+  return <div className={`work-item ${item.status}`}>
+    <button type="button" className="work-item-heading" onClick={() => hasDetails && setOpen((value) => !value)} aria-expanded={hasDetails ? open : undefined}>
+      <span className="work-item-icon">{workIcon(item)}</span>
+      <span className="work-item-title">{item.title}</span>
+      {hasDetails && (open ? <ChevronUp className="work-item-chevron" /> : <ChevronDown className="work-item-chevron" />)}
+      <span className="work-item-state">{item.status === "running" ? <LoaderCircle className="spin" /> : item.status === "error" ? <AlertCircle /> : <Check />}</span>
+    </button>
+    {open && hasDetails && <div className="work-item-details">{item.detail && <code>{item.detail}</code>}{item.context && <pre>{item.context}</pre>}</div>}
+  </div>;
+}
+
+function workIcon(item: WorkActivity) {
+  if (item.kind === "thinking") return <BrainCircuit />;
+  if (item.kind === "search") return <Search />;
+  if (item.kind === "edit") return <FilePenLine />;
+  if (item.kind === "tool") return <Code2 />;
+  if (item.kind === "error") return <AlertCircle />;
+  return <Terminal />;
 }
 
 function PendingCard({ pending, onResolve }: { pending: TaskWorkspace["pendingRequests"][number]; onResolve: (body: { approved?: boolean; answers?: Record<string, string> }) => void }) {

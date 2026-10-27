@@ -15,6 +15,7 @@ import {
   type TaskTone,
   type TaskIntakeState,
   type TaskWorkspace,
+  type WorkActivity,
 } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
 import type { TaskService } from "./task-service.js";
@@ -45,6 +46,13 @@ interface RequestRow {
   payload_json: string; status: PendingRequest["status"]; created_at: string; resolved_at: string | null;
 }
 
+interface SessionEventRow {
+  id: number;
+  event_type: string;
+  payload_json: string | null;
+  created_at: string;
+}
+
 export interface CapacitySnapshot {
   logicalCpus: number;
   totalMemoryBytes: number;
@@ -72,6 +80,81 @@ export function isolatedCodexEnvironment(source: NodeJS.ProcessEnv = process.env
 
 function object(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
+}
+
+function cleanActivityText(value: unknown, limit = 900): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/((?:authorization|api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s'\"]+/gi, "$1[redacted]")
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned;
+}
+
+function displayCommand(item: JsonObject): string | null {
+  const actions = Array.isArray(item.commandActions) ? item.commandActions.map(object) : [];
+  const actionCommand = actions.find((action) => typeof action.command === "string")?.command;
+  const command = cleanActivityText(actionCommand ?? item.command);
+  return command?.replace(/^\/bin\/(?:ba)?sh\s+-lc\s+/, "") ?? null;
+}
+
+function commandTitle(command: string | null): string {
+  if (!command) return "Running a command";
+  if (/\b(?:jest|vitest|pytest|cargo test|go test|npm test|npm run test)\b/i.test(command)) return "Running tests";
+  if (/\b(?:tsc|typecheck|mypy)\b/i.test(command)) return "Checking types";
+  if (/\b(?:eslint|biome|ruff|lint)\b/i.test(command)) return "Checking code quality";
+  if (/\b(?:git status|git diff|git log)\b/i.test(command)) return "Checking changes";
+  if (/\b(?:rg|grep|sed|head|tail|find|ls)\b/i.test(command)) return "Inspecting the workspace";
+  if (/\b(?:deploy|pm2|docker|kubectl|systemctl)\b/i.test(command)) return "Running deployment work";
+  if (/\b(?:curl|wget)\b/i.test(command)) return "Checking a service";
+  return "Running a command";
+}
+
+function activityFromItem(row: SessionEventRow, item: JsonObject): WorkActivity | null {
+  const id = typeof item.id === "string" ? item.id : null;
+  const type = typeof item.type === "string" ? item.type : "";
+  if (!id || type === "agentMessage" || type === "userMessage") return null;
+  const completed = row.event_type === "item/completed";
+  const failed = completed && (item.status === "failed" || item.status === "error" || (typeof item.exitCode === "number" && item.exitCode !== 0) || Boolean(item.error));
+  const base = { id, status: failed ? "error" as const : completed ? "done" as const : "running" as const, startedAt: row.created_at, updatedAt: row.created_at };
+  if (type === "reasoning") return { ...base, kind: "thinking", title: completed ? "Thought through the next step" : "Thinking through the request", detail: null, context: null };
+  if (type === "commandExecution") {
+    const command = displayCommand(item);
+    const output = failed ? cleanActivityText(item.aggregatedOutput, 500) : null;
+    return { ...base, kind: failed ? "error" : "command", title: failed ? "Command failed" : commandTitle(command), detail: command, context: output ?? cleanActivityText(item.cwd, 220) };
+  }
+  if (type === "fileChange") {
+    const changes = Array.isArray(item.changes) ? item.changes.map(object) : [];
+    const paths = changes.map((change) => cleanActivityText(change.path, 220)).filter((path): path is string => Boolean(path));
+    const count = paths.length;
+    return { ...base, kind: failed ? "error" : "edit", title: failed ? "File change failed" : count === 1 ? "Edited 1 file" : `Edited ${count || "some"} files`, detail: paths.join("\n") || null, context: null };
+  }
+  if (type === "mcpToolCall") {
+    const server = cleanActivityText(item.server, 100);
+    const tool = cleanActivityText(item.tool, 120);
+    const args = item.arguments && typeof item.arguments === "object" ? cleanActivityText(JSON.stringify(item.arguments), 600) : null;
+    return { ...base, kind: failed ? "error" : "tool", title: failed ? `${tool ?? "Tool"} failed` : [server, tool].filter(Boolean).join(" · ") || "Using a tool", detail: args, context: cleanActivityText(item.error, 400) };
+  }
+  if (/search/i.test(type)) return { ...base, kind: "search", title: completed ? "Search completed" : "Searching", detail: cleanActivityText(item.query ?? item.term, 500), context: null };
+  return { ...base, kind: failed ? "error" : "tool", title: failed ? `${type} failed` : completed ? `${type} completed` : `Using ${type}`, detail: null, context: null };
+}
+
+export function projectWorkActivities(rows: SessionEventRow[], sessionRunning: boolean): WorkActivity[] {
+  const activities = new Map<string, WorkActivity>();
+  for (const row of rows) {
+    if (row.event_type !== "item/started" && row.event_type !== "item/completed") continue;
+    let payload: JsonObject;
+    try { payload = object(JSON.parse(row.payload_json || "{}")); } catch { continue; }
+    const item = object(object(payload.payload).item);
+    const activity = activityFromItem(row, item);
+    if (!activity) continue;
+    const previous = activities.get(activity.id);
+    activities.set(activity.id, previous ? { ...activity, startedAt: previous.startedAt } : activity);
+  }
+  const projected = [...activities.values()];
+  if (!sessionRunning) for (const activity of projected) if (activity.status === "running") activity.status = "done";
+  return projected.slice(-24);
 }
 
 function safeDesign(document: DesignDocument): boolean {
@@ -330,11 +413,18 @@ export class AgentService {
     })) : [];
     const recentEvents = (this.database.db.prepare(`SELECT event_type AS type, created_at AS createdAt FROM session_events
       WHERE owner_type = ? AND owner_id = ? ORDER BY id DESC LIMIT 30`).all(ownerType, ownerId) as Array<{ type: string; createdAt: string }>).reverse();
+    const activityTurnId = session.activeTurnId ?? (this.database.db.prepare(`SELECT turn_id AS turnId FROM session_events
+      WHERE owner_type = ? AND owner_id = ? AND turn_id IS NOT NULL ORDER BY id DESC LIMIT 1`).get(ownerType, ownerId) as { turnId: string } | undefined)?.turnId;
+    const activityRows = activityTurnId ? (this.database.db.prepare(`SELECT id, event_type, payload_json, created_at FROM session_events
+      WHERE owner_type = ? AND owner_id = ? AND turn_id = ? AND event_type IN ('item/started','item/completed') ORDER BY id
+    `).all(ownerType, ownerId, activityTurnId) as SessionEventRow[]) : [];
+    const workActivities = projectWorkActivities(activityRows, session.runState === "running" || session.runState === "waiting");
     return {
       session, messages, pendingRequests,
       design: designRow ? { document: JSON.parse(designRow.document_json) as DesignDocument, revision: designRow.revision, updatedAt: designRow.updated_at } : null,
       designVersions,
       recentEvents,
+      workActivities,
     };
   }
 

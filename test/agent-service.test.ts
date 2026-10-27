@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasCurrentUserAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, recommendedParallelism } from "../src/server/agent-service.js";
+import { hasCurrentUserAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
   const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
@@ -53,4 +53,25 @@ test("orchestrator actions require evidence from the current user turn, not keyw
   assert.equal(hasCurrentUserAuthorization("make the first one only", "the first one"), true);
   assert.equal(hasCurrentUserAuthorization("How would you handle them?", "start"), false);
   assert.equal(hasCurrentUserAuthorization(undefined, "Retry"), false);
+});
+
+test("session events become useful Orca-style work activities without protocol noise", () => {
+  const at = "2026-10-27T20:00:00.000Z";
+  const event = (id: number, event_type: string, item: Record<string, unknown>) => ({
+    id, event_type, created_at: at, payload_json: JSON.stringify({ payload: { item } }),
+  });
+  const activities = projectWorkActivities([
+    event(1, "item/started", { id: "reason-1", type: "reasoning" }),
+    event(2, "item/completed", { id: "reason-1", type: "reasoning" }),
+    event(3, "item/started", { id: "command-1", type: "commandExecution", command: "npm test", cwd: "/workspace", status: "inProgress" }),
+    event(4, "item/completed", { id: "command-1", type: "commandExecution", command: "npm test", cwd: "/workspace", status: "failed", exitCode: 1, aggregatedOutput: "1 test failed" }),
+    event(5, "item/completed", { id: "message-1", type: "agentMessage", text: "Done" }),
+  ], true);
+  assert.equal(activities.length, 2);
+  assert.deepEqual(activities.map(({ kind, title, status }) => ({ kind, title, status })), [
+    { kind: "thinking", title: "Thought through the next step", status: "done" },
+    { kind: "error", title: "Command failed", status: "error" },
+  ]);
+  assert.equal(activities[1]?.detail, "npm test");
+  assert.equal(activities[1]?.context, "1 test failed");
 });

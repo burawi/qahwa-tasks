@@ -107,6 +107,17 @@ export interface DesignDocument {
   css: string;
 }
 
+export interface WorkActivity {
+  id: string;
+  kind: "thinking" | "command" | "edit" | "tool" | "search" | "error";
+  title: string;
+  detail: string | null;
+  context: string | null;
+  status: "running" | "done" | "error";
+  startedAt: string;
+  updatedAt: string;
+}
+
 export interface TaskWorkspace {
   session: AgentSession;
   messages: ChatMessage[];
@@ -114,6 +125,7 @@ export interface TaskWorkspace {
   design: { document: DesignDocument; revision: number; updatedAt: string } | null;
   designVersions: Array<{ id: string; name: string; document: DesignDocument; revision: number; createdAt: string }>;
   recentEvents: Array<{ type: string; createdAt: string }>;
+  workActivities: WorkActivity[];
 }
 
 export interface RelatedTask {
