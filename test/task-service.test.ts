@@ -33,6 +33,8 @@ test("creates human-readable IDs and globally ordered tasks", () => {
     assert.deepEqual(tasks.listTasks({ tab: "backlog" }).map((task) => task.humanId), ["WAS-0001", "WAS-0002"]);
     tasks.reorder(second.id, { afterId: first.id }, "user");
     assert.deepEqual(tasks.listTasks({ tab: "backlog" }).map((task) => task.humanId), ["WAS-0002", "WAS-0001"]);
+    tasks.prioritize([first.humanId, second.humanId], "system");
+    assert.deepEqual(tasks.listTasks({ tab: "backlog" }).map((task) => task.humanId), ["WAS-0001", "WAS-0002"]);
   } finally { database.close(); }
 });
 

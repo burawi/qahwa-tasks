@@ -3,7 +3,7 @@ import test from "node:test";
 import { isolatedCodexEnvironment, parseAgentEnvelope, recommendedParallelism } from "../src/server/agent-service.js";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
-  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
+  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
   assert.equal(response.body, "Implemented the dashboard.");
   assert.equal(response.message, "Implemented");
   assert.equal(response.tone, "green");
@@ -11,6 +11,7 @@ test("agent envelope extracts task presence, surface, design, and orchestrator s
   assert.equal(response.design?.artboard.width, 390);
   assert.equal(response.review, true);
   assert.deepEqual(response.startTasks, ["WAS-0012"]);
+  assert.deepEqual(response.priorityTasks, ["WAS-0012", "QAH-0004"]);
 });
 
 test("agent envelope rejects executable design documents", () => {

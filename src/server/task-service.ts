@@ -417,6 +417,26 @@ export class TaskService {
     return this.getTask(task.id);
   }
 
+  prioritize(humanIds: string[], actor: Actor): void {
+    const requested = [...new Set(humanIds)];
+    assertDomain(requested.length > 0 && requested.length <= 200, "Priority list must contain 1–200 tasks", "invalid_priority");
+    const tasks = requested.map((id) => this.getTask(id));
+    assertDomain(tasks.every((task) => task.status !== "closed"), "Closed tasks cannot be prioritized", "invalid_priority", 409);
+    const activeTasks = this.listTasks({ tab: "active" });
+    this.database.db.transaction(() => {
+      for (const status of ["backlog", "todo", "in_progress", "in_review"] as TaskStatus[]) {
+        const selected = tasks.filter((task) => task.status === status);
+        if (!selected.length) continue;
+        const selectedIds = new Set(selected.map((task) => task.id));
+        const remaining = activeTasks.filter((task) => task.status === status && !selectedIds.has(task.id));
+        [...selected, ...remaining].forEach((task, index) => {
+          this.database.db.prepare("UPDATE tasks SET rank = ?, updated_at = ? WHERE id = ?").run((index + 1) * 1024, now(), task.id);
+        });
+        for (const task of selected) this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "task.reordered", details: { source: "orchestrator-priority" } });
+      }
+    })();
+  }
+
   deleteBacklogTask(id: string, actor: Actor): void {
     const task = this.getTask(id);
     assertDomain(task.status === "backlog", "Only Backlog tasks can be deleted", "task_not_deletable", 409);

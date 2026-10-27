@@ -105,7 +105,7 @@ export function recommendedParallelism(logicalCpus = cpus().length, freeBytes = 
 }
 
 export function parseAgentEnvelope(text: string): {
-  body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean; startTasks: string[];
+  body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean; startTasks: string[]; priorityTasks: string[];
 } {
   let body = text.trim();
   let message: string | undefined;
@@ -114,6 +114,7 @@ export function parseAgentEnvelope(text: string): {
   let design: DesignDocument | undefined;
   let review = false;
   const startTasks: string[] = [];
+  const priorityTasks: string[] = [];
   const metadata = /<!--\s*qahwa:(\{[\s\S]*?\})\s*-->/i.exec(body);
   if (metadata) {
     try {
@@ -146,7 +147,11 @@ export function parseAgentEnvelope(text: string): {
     startTasks.push(id);
     return "";
   }).trim();
-  return { body, message, tone, surface, design, review, startTasks };
+  body = body.replace(/<!--\s*qahwa-priority:([A-Z0-9,\s-]+)\s*-->/gi, (_match, ids: string) => {
+    for (const id of ids.split(",").map((value) => value.trim()).filter(Boolean)) if (!priorityTasks.includes(id)) priorityTasks.push(id);
+    return "";
+  }).trim();
+  return { body, message, tone, surface, design, review, startTasks, priorityTasks };
 }
 
 class CodexAppServer {
@@ -232,6 +237,7 @@ export class AgentService {
   private readonly turnOwners = new Map<string, Owner>();
   private pendingOrchestratorStarts: string[] = [];
   private orchestratorStartAuthorized = false;
+  private orchestratorPriorityAuthorized = false;
   private readonly orchestratorObservations: string[] = [];
 
   constructor(private readonly database: AppDatabase, private readonly tasks: TaskService) {
@@ -315,6 +321,7 @@ export class AgentService {
         || /\b(start|run|trigger|launch|execute)\b[\s\S]{0,80}\b(tasks?|work)\b/i.test(text)
         || /\b(you decide|use your judgment)\b[\s\S]{0,80}\b(start|run|tasks?|work)\b/i.test(text)
       );
+      this.orchestratorPriorityAuthorized = messageRole === "user" && /\b(prioriti[sz]e|priority|reorder|order)\b/i.test(text);
     }
     this.addMessage(ownerType, ownerId, messageRole, text);
     this.updateSession(ownerType, ownerId, { runState: "running", lastError: null });
@@ -426,7 +433,7 @@ export class AgentService {
         session: task.sessionState, message: task.smartMessage, tone: task.tone,
       }));
       const capacity = this.capacity();
-      return `You are Qahwa's single orchestration session. Collaborate with the user on priorities and watch the task portfolio without micromanaging task agents. Be proactive only when something materially changes, needs a decision, is blocked, or capacity becomes useful. You may recommend concurrent work using this capacity snapshot: ${JSON.stringify(capacity)}. To actually trigger an authorized task, append <!-- qahwa-start:HUMAN-ID --> for each task. Never start a task merely because it exists; only do so when the user has authorized it in this conversation. Current active task projection: ${JSON.stringify(tasks)}. ${envelope}\n\nUser: ${userText}`;
+      return `You are Qahwa's single orchestration session. Collaborate with the user on priorities and watch the task portfolio without micromanaging task agents. Be proactive only when something materially changes, needs a decision, is blocked, or capacity becomes useful. You may recommend concurrent work using this capacity snapshot: ${JSON.stringify(capacity)}. To actually trigger an authorized task, append <!-- qahwa-start:HUMAN-ID --> for each task. To apply a user-authorized priority order, append one <!-- qahwa-priority:ID-0001,ID-0002 --> marker listing highest priority first. Never start or reorder merely because a task exists; only do so when the user has authorized that action in this conversation. Current active task projection: ${JSON.stringify(tasks)}. ${envelope}\n\nUser: ${userText}`;
     }
     const task = this.tasks.getTask(ownerId);
     const workspace = this.workspace("task", ownerId);
@@ -489,6 +496,7 @@ export class AgentService {
         }
       }
       if (owner.ownerType === "orchestrator") this.orchestratorStartAuthorized = false;
+      if (owner.ownerType === "orchestrator") this.orchestratorPriorityAuthorized = false;
     }
   }
 
@@ -515,6 +523,12 @@ export class AgentService {
     if (owner.ownerType === "orchestrator" && parsed.startTasks.length) {
       if (this.orchestratorStartAuthorized) this.pendingOrchestratorStarts = parsed.startTasks;
       else this.addMessage("orchestrator", "main", "system", "No tasks were started because this turn did not include user authorization to start work.");
+    }
+    if (owner.ownerType === "orchestrator" && parsed.priorityTasks.length) {
+      if (this.orchestratorPriorityAuthorized) {
+        this.tasks.prioritize(parsed.priorityTasks, "system");
+        this.addMessage("orchestrator", "main", "system", `Priority updated: ${parsed.priorityTasks.join(" → ")}.`);
+      } else this.addMessage("orchestrator", "main", "system", "Priority was not changed because the user did not authorize reordering in this turn.");
     }
   }
 
