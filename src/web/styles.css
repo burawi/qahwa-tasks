@@ -397,6 +397,10 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in
 .work-log.error .work-log-orb { background: var(--red-soft); color: var(--red); }
 .work-log-orb svg { width: 17px; }
 .work-log-list { padding: 2px 12px 12px 55px; display: grid; gap: 3px; }
+.work-log-pending { min-height: 34px; padding: 2px 16px 12px 57px; display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
+.work-log-pending i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--blue); animation: agent-pulse 1.2s infinite; }
+.work-log-pending i:nth-child(2) { animation-delay: .15s; }
+.work-log-pending i:nth-child(3) { margin-right: 4px; animation-delay: .3s; }
 .work-item { min-width: 0; border-radius: 10px; }
 .work-item-heading { width: 100%; min-height: 32px; padding: 4px 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); text-align: left; }
 .work-item-heading:hover { background: var(--surface-2); }

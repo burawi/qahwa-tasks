@@ -25,7 +25,12 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
   const [busy, setBusy] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [selectedDesignElement, setSelectedDesignElement] = useState<string | null>(null);
+  const chatRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const pinnedToBottomRef = useRef(true);
+  const forceScrollRef = useRef(true);
+  const workActivities = workspace?.workActivities ?? [];
+  const latestActivityAt = workActivities.length ? workActivities[workActivities.length - 1]?.updatedAt : undefined;
 
   const load = async () => {
     if (mode === "task" && taskId) {
@@ -44,7 +49,11 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
     const timer = window.setInterval(() => void load().catch(() => undefined), 1500);
     return () => window.clearInterval(timer);
   }, [mode, taskId]);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [workspace?.messages.length, workspace?.workActivities.at(-1)?.updatedAt]);
+  useEffect(() => {
+    if (!forceScrollRef.current && !pinnedToBottomRef.current) return;
+    endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+    forceScrollRef.current = false;
+  }, [workspace?.messages.length, latestActivityAt]);
 
   const act = async (work: () => Promise<unknown>) => {
     setBusy(true);
@@ -56,6 +65,7 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
     event.preventDefault();
     const text = message.trim();
     if (!text) return;
+    forceScrollRef.current = true;
     setMessage("");
     const contextual = selectedDesignElement ? `${text}\n\nSelected canvas element: ${selectedDesignElement}` : text;
     void act(() => mode === "task" && taskId ? api.sendTaskMessage(taskId, contextual) : api.sendOrchestratorMessage(contextual));
@@ -89,7 +99,10 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
       }}>Cancel task</button>
     </div>}
 
-    <div className="chat-stream">
+    <div className="chat-stream" ref={chatRef} onScroll={(event) => {
+      const element = event.currentTarget;
+      pinnedToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+    }}>
       {workspace?.messages.length === 0 && <div className="session-empty"><span className="empty-orb">{mode === "task" ? <Sparkles /> : <Network />}</span><span className="empty-kicker">{mode === "task" ? "Dedicated session" : "One clear overview"}</span><h2>{mode === "task" ? "Ready when you are" : "Plan the work, not every move"}</h2><p>{mode === "task" ? "Start this task when you want its session to understand the note, ask what is missing, and choose between a focused chat or design canvas." : "Discuss priorities, dependencies, and what can safely run together. The orchestrator watches progress and speaks up when something matters."}</p></div>}
       {workspace?.messages.map((entry) => <article key={entry.id} className={`chat-message ${entry.role}`}>
         <span className="message-avatar" aria-hidden="true">{entry.role === "user" ? <UserRound /> : entry.role === "assistant" ? mode === "task" ? <Bot /> : <Network /> : <Info />}</span>
@@ -99,7 +112,7 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
           img: ({ ...props }) => <a href={props.src} target="_blank" rel="noopener noreferrer external" onClick={(event) => { if (!props.src) return; event.preventDefault(); window.open(props.src, "_blank", "noopener,noreferrer"); }}><img {...props} loading="lazy" /></a>,
         }}>{entry.body}</ReactMarkdown></div></div>
       </article>)}
-      {workspace && (workspace.workActivities.length > 0 || running) && <WorkLog activities={workspace.workActivities} running={running} waiting={workspace.session.runState === "waiting"} />}
+      {workspace && (workActivities.length > 0 || running) && <WorkLog activities={workActivities} running={running} waiting={workspace.session.runState === "waiting"} />}
       {workspace?.pendingRequests.map((pending) => <PendingCard key={pending.id} pending={pending} onResolve={(body) => void act(() => api.respondToRequest(pending.id, body))} />)}
       <div ref={endRef} />
     </div>
@@ -158,7 +171,7 @@ function DesignCanvas({ workspace, taskId, onSelect, onChanged, onError }: { wor
   const run = async (operation: () => Promise<unknown>) => { try { await operation(); setVersionId("current"); await onChanged(); } catch (error) { onError(error instanceof Error ? error.message : "Canvas action failed"); } };
   return <section className={`design-panel${fullscreen ? " fullscreen" : ""}`}>
     <header><div><strong>{document.artboard.name}</strong><small>Revision {displayedRevision} · {document.artboard.width}×{document.artboard.height}{selection ? ` · ${selection.split(":")[0]}` : ""}</small></div><div className="canvas-version-controls">{workspace.designVersions.length > 0 && <select aria-label="Canvas version" value={versionId} onChange={(event) => { setVersionId(event.target.value); setSelection(null); onSelect(null); }}><option value="current">Current</option>{workspace.designVersions.map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}</select>}<button type="button" onClick={() => { const name = window.prompt("Version name", `Revision ${displayedRevision}`); if (name) void run(() => api.createDesignVersion(taskId, name)); }} aria-label="Save version"><Save /></button>{versionId !== "current" && <button type="button" onClick={() => { if (window.confirm("Restore this version as the current canvas?")) void run(() => api.restoreDesignVersion(taskId, versionId)); }} aria-label="Restore version"><RotateCcw /></button>}</div><div className="canvas-controls"><button type="button" onClick={() => setZoom(Math.max(.25, zoom - .1))} aria-label="Zoom out"><Minus /></button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setZoom(Math.min(1.5, zoom + .1))} aria-label="Zoom in"><Plus /></button><button type="button" onClick={() => setZoom(.75)} aria-label="Fit canvas"><Maximize2 /></button><button type="button" onClick={() => setFullscreen(!fullscreen)} aria-label={fullscreen ? "Exit full canvas" : "Open full canvas"}>{fullscreen ? <Shrink /> : <Expand />}</button></div></header>
-    {workspace.session.runState === "running" && <div className="canvas-activity"><LoaderCircle />{workspace.workActivities.filter((item) => item.status === "running").at(-1)?.title ?? "Working on canvas"}</div>}
+    {workspace.session.runState === "running" && <div className="canvas-activity"><LoaderCircle />{lastRunningTitle(workspace.workActivities ?? []) ?? "Working on canvas"}</div>}
     <div className="design-stage" ref={stageRef}><iframe ref={frameRef} title={document.artboard.name} sandbox="allow-scripts" srcDoc={source} style={{ width: document.artboard.width * zoom, height: document.artboard.height * zoom }} /></div>
   </section>;
 }
@@ -174,8 +187,15 @@ function WorkLog({ activities, running, waiting }: { activities: WorkActivity[];
       <span><strong>{heading}</strong><small>{activities.length ? `${activities.length} ${activities.length === 1 ? "activity" : "activities"}` : "Preparing the first step"}</small></span>
       {expanded ? <ChevronUp /> : <ChevronDown />}
     </button>
-    {expanded && activities.length > 0 && <div className="work-log-list">{activities.map((item) => <WorkItem key={item.id} item={item} />)}</div>}
+    {expanded && (activities.length > 0 ? <div className="work-log-list">{activities.map((item) => <WorkItem key={item.id} item={item} />)}</div> : running ? <div className="work-log-pending"><i /><i /><i /><span>Waiting for activity details…</span></div> : null)}
   </section>;
+}
+
+function lastRunningTitle(activities: WorkActivity[]): string | undefined {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    if (activities[index]?.status === "running") return activities[index]?.title;
+  }
+  return undefined;
 }
 
 function WorkItem({ item }: { item: WorkActivity }) {
