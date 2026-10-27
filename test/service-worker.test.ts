@@ -64,8 +64,7 @@ test("unknown historical script and stylesheet hashes recover with safe MIME typ
   const dataDir = mkdtempSync(join(tmpdir(), "qahwa-tasks-recovery-"));
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   };
   const app = await buildApp(config, new AppDatabase(config));
   try {

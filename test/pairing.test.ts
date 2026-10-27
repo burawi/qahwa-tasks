@@ -30,12 +30,10 @@ test("Qahwa Design-style pairing keeps credentials inside an encrypted persisten
   const dataDir = mkdtempSync(join(tmpdir(), "qahwa-pairing-"));
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "missing"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   };
   const database = new AppDatabase(config);
-  const auth = new AuthService(database, 365, true);
-  await auth.setPassword("correct horse battery staple");
+  const auth = new AuthService(database, 365);
   const link = new PairingService(database, auth, config.publicBaseUrl).createLink();
   const app = await buildApp(config, database);
   try {

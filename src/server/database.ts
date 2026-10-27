@@ -229,21 +229,6 @@ CREATE TABLE IF NOT EXISTS pairing_grants (
   used_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS notification_outbox (
-  id TEXT PRIMARY KEY,
-  event_type TEXT NOT NULL,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  payload_json TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed')),
-  next_attempt_at TEXT NOT NULL,
-  last_error TEXT,
-  created_at TEXT NOT NULL,
-  sent_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_notification_outbox_pending
-ON notification_outbox(status, next_attempt_at);
 `;
 
 export class AppDatabase {
@@ -265,6 +250,8 @@ export class AppDatabase {
   }
 
   private migrate(): void {
+    this.db.exec("DROP TABLE IF EXISTS notification_outbox");
+    this.db.prepare("DELETE FROM app_settings WHERE key IN ('password_hash', 'setup_token')").run();
     const columns = new Set((this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((row) => row.name));
     const additions = [
       ["logo_filename", "TEXT"],

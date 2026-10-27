@@ -15,7 +15,7 @@ test("database backups include project logo assets", async () => {
   mkdirSync(root);
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir, backupDir,
-    sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020", qahwaNotifyTokenFile: join(dataDir, "token"),
+    sessionDays: 365,
   };
   const database = new AppDatabase(config);
   try {

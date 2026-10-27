@@ -13,12 +13,11 @@ Chats render GitHub-flavored Markdown, tables, safe links, and image previews. T
 
 ```bash
 npm install
-npm run auth:set-password
 npm run dev
 npm run dev:web
 ```
 
-The backend defaults to `127.0.0.1:3022`; Vite proxies `/api` during development.
+The backend defaults to `127.0.0.1:3022`. Create a local one-time pairing link with `npm run pair`.
 
 ## Production
 
@@ -27,7 +26,7 @@ npm run build
 pm2 start deploy/ecosystem.config.cjs
 ```
 
-The production service is designed for the existing Cloudflare Tunnel route at `tasks.qahwa.pro`. Configure the password locally with `npm run auth:set-password`; credentials, SQLite data, backups and exports are never committed.
+The production service is designed for the existing Cloudflare Tunnel route at `tasks.qahwa.pro`. Device keys, SQLite data, backups, pairing grants, and exports are never committed.
 
 ## Device pairing
 
@@ -64,12 +63,6 @@ The companion skill is stored in `skill/qahwa-tasks/SKILL.md` and should be inst
 
 Coding outputs may carry a commit proposal containing the exact repository root, full base revision, commit message, reviewed repository-relative files, and release note. The Output card exposes all of that information before the user approves it.
 
-Approval is handled directly by the authenticated backend. It rechecks the repository revision and a stored snapshot of every reviewed file, builds the commit with an isolated temporary Git index, and atomically advances `HEAD` only from the reviewed base. Unrelated staged and dirty files are preserved and excluded; Git hooks are disabled for this backend action. The action never starts Codex, pushes, publishes, or deploys.
+Approval is handled directly by the paired backend. It rechecks the repository revision and a stored snapshot of every reviewed file, builds the commit with an isolated temporary Git index, and atomically advances `HEAD` only from the reviewed base. Unrelated staged and dirty files are preserved and excluded; Git hooks are disabled for this backend action. The action never starts Codex, pushes, publishes, or deploys.
 
 After a successful commit, Qahwa Tasks creates or updates the project's single active `Publish/deploy changes` Todo, appends the commit and release note, and relates it to the approved source task. Publication and deployment still require separate explicit instructions.
-
-## Notifications
-
-Qahwa Tasks does not send automatic Qahwa Notify alerts for task starts, review submissions, or comments requiring a response. Task status, outputs, and response-required comments remain available in the app. The server and MCP do not process the legacy notification outbox, so previously queued alerts are not sent on startup.
-
-The explicitly invoked `npm run auth:send-setup-link` command can still send an account setup link through Qahwa Notify using `QAHWA_NOTIFY_URL` and `QAHWA_NOTIFY_TOKEN_FILE`.

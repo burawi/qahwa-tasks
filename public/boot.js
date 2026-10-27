@@ -45,7 +45,7 @@
     var detail = document.createElement("p");
     detail.textContent = messageFrom(value);
     var help = document.createElement("p");
-    help.textContent = "A diagnostic was recorded without your password or task content.";
+    help.textContent = "A diagnostic was recorded without device keys or task content.";
     var button = document.createElement("button");
     button.type = "button";
     button.textContent = "Reload cleanly";

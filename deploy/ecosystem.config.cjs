@@ -11,8 +11,6 @@ module.exports = {
         PUBLIC_BASE_URL: "https://tasks.qahwa.pro",
         DATA_DIR: "/home/burawi/.local/share/qahwa-tasks",
         BACKUP_DIR: "/home/burawi/.local/share/qahwa-tasks/backups",
-        QAHWA_NOTIFY_URL: "http://127.0.0.1:3020",
-        QAHWA_NOTIFY_TOKEN_FILE: "/home/burawi/.config/qahwa-notify/send.token",
         SESSION_DAYS: "365"
       },
       max_memory_restart: "350M",

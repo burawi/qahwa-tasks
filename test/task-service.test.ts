@@ -14,8 +14,7 @@ function fixture() {
   mkdirSync(root);
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   };
   const database = new AppDatabase(config);
   const tasks = new TaskService(database);
@@ -45,7 +44,6 @@ test("enforces the agreed workflow and explicit Codex closure", () => {
     assert.throws(() => tasks.transition(task.id, { to: "in_progress" }, "codex"), /Cannot move backlog/);
     tasks.transition(task.id, { to: "todo" }, "user");
     tasks.transition(task.id, { to: "in_progress" }, "codex");
-    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM notification_outbox").get().count, 0);
     tasks.submitForReview(task.id, { sessionId: "session-1", summary: "Implemented", validation: ["Tests passed"] }, "codex");
     const reviewed = tasks.getTask(task.id);
     assert.equal(reviewed.status, "in_review");
@@ -62,7 +60,7 @@ test("enforces the agreed workflow and explicit Codex closure", () => {
   } finally { database.close(); }
 });
 
-test("task lifecycle and response-required comments do not queue Qahwa Notify alerts", () => {
+test("task lifecycle keeps response-required comments in the task record", () => {
   const { database, tasks, project } = fixture();
   try {
     const task = tasks.createTask({ projectId: project.id, title: "Quiet workflow", status: "todo" }, "codex");
@@ -74,7 +72,6 @@ test("task lifecycle and response-required comments do not queue Qahwa Notify al
     assert.equal(tasks.getTask(task.id).comments[0]?.plainText, "Please confirm the result");
     tasks.submitForReview(task.id, { summary: "Ready for review" }, "codex");
     assert.equal(tasks.getTask(task.id).status, "in_review");
-    assert.equal(database.db.prepare("SELECT COUNT(*) AS count FROM notification_outbox").get().count, 0);
   } finally { database.close(); }
 });
 
@@ -142,8 +139,7 @@ test("removes legacy frontend preview metadata without disturbing task outputs",
 
   const reopened = new AppDatabase({
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   }, path);
   try {
     const columns = reopened.db.prepare("PRAGMA table_info(task_outputs)").all() as Array<{ name: string }>;
@@ -166,8 +162,7 @@ test("migrates legacy handoff comments into structured outputs without removing 
   database.close();
   const reopened = new AppDatabase({
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   }, config);
   try {
     const migrated = new TaskService(reopened).getTask(created.id);

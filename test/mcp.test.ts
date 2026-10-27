@@ -14,8 +14,7 @@ test("MCP return-to-work adapter preserves the Codex-only review transition", ()
   mkdirSync(root);
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   };
   const database = new AppDatabase(config);
   const tasks = new TaskService(database);
@@ -39,8 +38,7 @@ test("MCP relationship adapters add and remove links by human ID", () => {
   mkdirSync(root);
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "missing-token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   };
   const database = new AppDatabase(config);
   const tasks = new TaskService(database);

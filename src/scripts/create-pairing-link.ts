@@ -8,7 +8,7 @@ import { PairingService } from "../server/pairing.js";
 const config = loadConfig();
 const database = new AppDatabase(config);
 try {
-  const auth = new AuthService(database, config.sessionDays, config.publicBaseUrl.startsWith("https://"));
+  const auth = new AuthService(database, config.sessionDays);
   const result = new PairingService(database, auth, config.publicBaseUrl).createLink();
   const path = join(config.dataDir, "pairing-link");
   writeFileSync(path, result.uri, { mode: 0o600 });

@@ -29,8 +29,7 @@ function fixture() {
   git(root, "commit", "-qm", "initial");
   const config: Config = {
     host: "127.0.0.1", port: 3022, publicBaseUrl: "https://tasks.qahwa.pro", dataDir,
-    backupDir: join(dataDir, "backups"), sessionDays: 365, qahwaNotifyUrl: "http://127.0.0.1:3020",
-    qahwaNotifyTokenFile: join(dataDir, "token"),
+    backupDir: join(dataDir, "backups"), sessionDays: 365,
   };
   const database = new AppDatabase(config);
   const tasks = new TaskService(database);
@@ -119,16 +118,18 @@ test("approval refuses processing races and duplicate active publish tasks befor
 
 test("commit approval endpoint requires an authenticated user session", async () => {
   const { config, database, tasks, project, root } = fixture();
-  await new AuthService(database, 365, true).setPassword("correct horse battery staple");
+  const timestamp = new Date().toISOString();
+  database.db.prepare("INSERT INTO paired_devices (id, name, public_key, created_at, last_seen_at) VALUES ('test-device', 'Test', '', ?, ?)")
+    .run(timestamp, timestamp);
+  const token = new AuthService(database, 365).createSession("test", "127.0.0.1", "test-device").token;
+  const headers = { authorization: `Bearer ${token}`, origin: config.publicBaseUrl };
   writeFileSync(join(root, "reviewed.txt"), "reviewed\n");
   const task = submit(tasks, project.id, root, "Authorized", "Authorized release");
   const path = `/api/tasks/${task.id}/outputs/${task.outputs[0]!.id}/approve-commit`;
   const app = await buildApp(config, database);
   try {
     assert.equal((await app.inject({ method: "POST", url: path })).statusCode, 401);
-    const login = await app.inject({ method: "POST", url: "/api/auth/login", payload: { password: "correct horse battery staple" } });
-    const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
-    const approved = await app.inject({ method: "POST", url: path, headers: { cookie } });
+    const approved = await app.inject({ method: "POST", url: path, headers });
     assert.equal(approved.statusCode, 200);
     assert.equal(approved.json().task.outputs[0].commitApproval.status, "committed");
   } finally { await app.close(); }

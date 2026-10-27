@@ -1,7 +1,5 @@
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import cookie from "@fastify/cookie";
-import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
@@ -44,10 +42,8 @@ export async function buildApp(config: Config, database = new AppDatabase(config
   const app = Fastify({ logger: true, trustProxy: true, bodyLimit: 512 * 1024 });
   app.addContentTypeParser(/^image\//, { parseAs: "buffer" }, (_request, body, done) => done(null, body));
   app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_request, body, done) => done(null, body));
-  await app.register(cookie);
-  await app.register(rateLimit, { global: false });
   await app.register(websocket);
-  const auth = new AuthService(database, config.sessionDays, config.publicBaseUrl.startsWith("https://"));
+  const auth = new AuthService(database, config.sessionDays);
   const tasks = new TaskService(database);
   const agents = new AgentService(database, tasks);
   const pairing = new PairingService(database, auth, config.publicBaseUrl);
@@ -75,24 +71,11 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     return payload;
   });
 
-  app.get("/health", async () => ({ status: "ok", service: "qahwa-tasks", configured: auth.isConfigured(), time: new Date().toISOString() }));
-  app.get("/api/auth/state", async (request) => ({ authenticated: auth.authenticated(request), configured: auth.isConfigured() }));
-  app.post<{ Body: { password: string } }>("/api/auth/login", {
-    config: { rateLimit: { max: 5, timeWindow: "15 minutes" } },
-  }, async (request, reply) => {
-    await auth.login(request.body.password ?? "", request, reply);
-    return { authenticated: true };
-  });
-  app.post<{ Body: { password: string; token: string } }>("/api/auth/setup", {
-    config: { rateLimit: { max: 5, timeWindow: "15 minutes" } },
-  }, async (request, reply) => {
-    await auth.setup(request.body.password ?? "", request.body.token ?? "", request, reply);
-    return { authenticated: true, configured: true };
-  });
+  app.get("/health", async () => ({ status: "ok", service: "qahwa-tasks", time: new Date().toISOString() }));
 
   app.addHook("preHandler", async (request, reply) => {
-    if (!request.url.startsWith("/api/") || request.url.startsWith("/api/auth/login") || request.url.startsWith("/api/auth/setup") || request.url.startsWith("/api/auth/state")) return;
-    auth.requireSession(request, reply);
+    if (!request.url.startsWith("/api/")) return;
+    auth.requireSession(request);
     if (!["GET", "HEAD", "OPTIONS"].includes(request.method)) validateOrigin(request, config.publicBaseUrl);
   });
 
@@ -110,7 +93,6 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     return reply.code(204).send();
   });
 
-  registerAuthRoutes(app, context);
   app.get("/api/devices", async () => ({ devices: database.db.prepare(`
     SELECT id, name, created_at AS createdAt, last_seen_at AS lastSeenAt, revoked_at AS revokedAt
     FROM paired_devices ORDER BY created_at DESC
@@ -174,18 +156,6 @@ function validateOrigin(request: FastifyRequest, publicBaseUrl: string): void {
   if (!origin) return;
   const allowed = new Set([publicBaseUrl, `http://127.0.0.1:${new URL(publicBaseUrl).port || "3022"}`, "http://localhost:5173"]);
   if (!allowed.has(origin)) throw new DomainError("Origin not allowed", "invalid_origin", 403);
-}
-
-function registerAuthRoutes(app: FastifyInstance, context: AppContext): void {
-  app.post("/api/auth/logout", async (request, reply) => {
-    context.auth.logout(request, reply);
-    return { authenticated: false };
-  });
-  app.post("/api/auth/revoke-all", async (request, reply) => {
-    context.auth.revokeAll();
-    reply.clearCookie("qahwa_tasks_session", { path: "/" });
-    return { revoked: true };
-  });
 }
 
 function registerProjectRoutes(app: FastifyInstance, context: AppContext): void {
