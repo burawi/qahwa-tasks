@@ -1,15 +1,15 @@
 (function () {
   "use strict";
 
-  var attemptKey = "qahwa-bootstrap-recovery-v9";
+  var attemptKey = "qahwa-bootstrap-recovery-v10";
   var ready = false;
   var timer;
 
   function bypassPoisonedStylesheets() {
     Array.prototype.forEach.call(document.querySelectorAll('link[rel="stylesheet"][href]'), function (link) {
       var url = new URL(link.href, location.href);
-      if (url.origin !== location.origin || url.searchParams.get("qahwa-style") === "v9") return;
-      url.searchParams.set("qahwa-style", "v9");
+      if (url.origin !== location.origin || url.searchParams.get("qahwa-style") === "v10") return;
+      url.searchParams.set("qahwa-style", "v10");
       link.href = url.toString();
     });
   }
@@ -69,7 +69,7 @@
       return Promise.all(keys.filter(function (key) { return key.indexOf("qahwa-tasks-") === 0; }).map(function (key) { return caches.delete(key); }));
     }));
     Promise.allSettled(work).then(function () {
-      location.replace("/?recovery=v9&bootstrap=" + Date.now());
+      location.replace("/?recovery=v10&bootstrap=" + Date.now());
     });
   }
 

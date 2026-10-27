@@ -1,4 +1,4 @@
-import { Link2, ListTodo, MonitorSmartphone, Network, Plus, Settings2, WifiOff } from "lucide-react";
+import { Check, ChevronDown, Link2, ListTodo, MonitorSmartphone, Network, Plus, Settings2, ShieldCheck, WifiOff } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { Project, TaskSummary } from "../domain/types";
 import { api, connection, type ConnectionState } from "./api";
@@ -64,26 +64,40 @@ export function App() {
   const openTask = (task: TaskSummary) => { history.pushState({}, "", `/tasks/${task.humanId}`); setView("tasks"); setSelectedTask(task.humanId); };
   const selectView = (next: View) => { history.pushState({}, "", next === "orchestrator" ? "/orchestrator" : "/"); setSelectedTask(null); setView(next); };
 
+  const workingCount = tasks.filter((task) => task.sessionState === "running").length;
   return <div className="app-shell unified-shell">
     <header className="app-header unified-header">
-      <div className="brand"><span>✓</span><div><strong>Qahwa</strong><small>{tasks.filter((task) => task.sessionState === "running").length} working · {tasks.length} shown</small></div></div>
+      <button type="button" className="brand" onClick={() => selectView("tasks")} aria-label="Qahwa Tasks home"><span>Q</span><div><strong>Qahwa</strong><small>Tasks</small></div></button>
+      <nav className="desktop-tabs" aria-label="Main navigation">
+        <button type="button" className={view === "tasks" ? "active" : ""} onClick={() => selectView("tasks")}><ListTodo />Tasks</button>
+        <button type="button" className={view === "orchestrator" ? "active" : ""} onClick={() => selectView("orchestrator")}><Network />Orchestrator</button>
+      </nav>
+      <div className="header-actions">
       <button type="button" className="icon-button connection-indicator" onClick={() => {
         if (window.confirm("Disconnect this browser from Qahwa?")) connection.disconnect();
-      }} aria-label="Computer connected"><MonitorSmartphone /></button>
-      {view === "tasks" && <><button type="button" className="icon-button" onClick={() => setShowProjects(true)} aria-label="Manage projects"><Settings2 /></button>
-        <div className="project-filter">{selectedProject && <ProjectLogo logo={selectedProject.logo} prefix={selectedProject.prefix} size="small" />}
-          <select aria-label="Filter by project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All projects</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
-        </div></>}
+      }} aria-label="Computer connected"><span className="live-dot" /><MonitorSmartphone /></button>
+      <button type="button" className="icon-button" onClick={() => setShowProjects(true)} aria-label="Projects and settings"><Settings2 /></button>
+      </div>
     </header>
     {offline && <div className="offline-banner"><WifiOff />Offline · showing cached content</div>}
 
     {view === "tasks" ? <main className="unified-task-list">
-      <div className="list-controls"><div className="scope-tabs">{(["all", "active", "closed"] as Scope[]).map((value) => <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{value}</button>)}</div><span>{tasks.length} tasks</span></div>
+      <section className="tasks-heading">
+        <div><p className="eyebrow">Workspace</p><h1>{selectedProject?.name ?? "All tasks"}</h1><p>{workingCount ? `${workingCount} ${workingCount === 1 ? "session is" : "sessions are"} working now` : "Capture work, then start it when you are ready."}</p></div>
+        {activeProjects.length > 0 && <button type="button" className="primary desktop-create" onClick={() => setShowCreate(true)}><Plus />New task</button>}
+      </section>
+      <section className="task-toolbar" aria-label="Task filters">
+        <div className="project-filter">{selectedProject && <ProjectLogo logo={selectedProject.logo} prefix={selectedProject.prefix} size="small" />}
+          <select aria-label="Filter by project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All projects</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><ChevronDown />
+        </div>
+        <div className="scope-tabs">{(["all", "active", "closed"] as Scope[]).map((value) => <button type="button" key={value} className={scope === value ? "active" : ""} onClick={() => setScope(value)}>{value}</button>)}</div>
+        <span className="task-count">{tasks.length} {tasks.length === 1 ? "task" : "tasks"}</span>
+      </section>
       <div className="task-rows">{tasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => openTask(task)} />)}</div>
-      {tasks.length === 0 && <div className="empty-state"><span>✓</span><p>No tasks in this view.</p></div>}
+      {tasks.length === 0 && <div className="empty-state refined-empty"><span><Check /></span><h2>{scope === "all" && !projectId ? "A clear workspace" : "Nothing here yet"}</h2><p>{scope === "all" && !projectId ? "Add a quick note. Its session will help shape the work when you start it." : "No tasks match these filters."}</p>{scope === "all" && activeProjects.length > 0 && <button type="button" className="primary" onClick={() => setShowCreate(true)}><Plus />Create your first task</button>}</div>}
     </main> : <SessionWorkspace mode="orchestrator" onError={fail} onChanged={() => void loadTasks()} />}
 
-    {view === "tasks" && activeProjects.length > 0 && <button type="button" className="fab" onClick={() => setShowCreate(true)}><Plus /><span>Add task</span></button>}
+    {view === "tasks" && activeProjects.length > 0 && <button type="button" className="fab" onClick={() => setShowCreate(true)}><Plus /><span>New task</span></button>}
     <nav className="bottom-tabs two-tabs"><button type="button" className={view === "tasks" ? "active" : ""} onClick={() => selectView("tasks")}><ListTodo /><span>Tasks</span></button><button type="button" className={view === "orchestrator" ? "active" : ""} onClick={() => selectView("orchestrator")}><Network /><span>Orchestrator</span></button></nav>
 
     <Suspense fallback={<div className="screen-loading">Loading…</div>}>
@@ -105,8 +119,8 @@ function ConnectionScreen({ state, onError }: { state: ConnectionState; onError:
   const [busy, setBusy] = useState(false);
   const [pairingLink, setPairingLink] = useState("");
   const profile = connection.profile();
-  if (state === "connecting") return <main className="connection-screen"><div className="connection-card"><div className="coffee-mark">✓</div><h1>Connecting to your computer</h1><p>Your task workspace will open after the secure connection is ready.</p></div></main>;
-  if (state === "offline" && profile) return <main className="connection-screen"><div className="connection-card"><div className="coffee-mark">✓</div><h1>Computer unavailable</h1><p>Qahwa will keep reconnecting securely to the paired computer.</p><button className="primary" disabled={busy} onClick={() => {
+  if (state === "connecting") return <main className="connection-screen"><div className="connection-card"><div className="coffee-mark">Q</div><div className="connection-progress"><i /><i /><i /></div><h1>Connecting securely</h1><p>Your private workspace will open as soon as your computer responds.</p></div></main>;
+  if (state === "offline" && profile) return <main className="connection-screen"><div className="connection-card"><div className="coffee-mark">Q</div><span className="connection-kicker">Paired device</span><h1>Computer unavailable</h1><p>Qahwa will reconnect automatically. Your device identity is still safely paired.</p><button className="primary" disabled={busy} onClick={() => {
     setBusy(true);
     void connection.connect().catch((error) => onError(error instanceof Error ? error.message : "Could not reconnect")).finally(() => setBusy(false));
   }}><MonitorSmartphone /> Reconnect</button><button className="secondary" onClick={() => connection.disconnect()}>Forget this computer</button></div></main>;
@@ -114,7 +128,7 @@ function ConnectionScreen({ state, onError }: { state: ConnectionState; onError:
     event.preventDefault();
     setBusy(true);
     void connection.pair(pairingLink.trim()).catch((error) => onError(error instanceof Error ? error.message : "Pairing failed")).finally(() => setBusy(false));
-  }}><div className="coffee-mark">✓</div><h1>Connect your Qahwa server</h1><p>Paste the one-time pairing link created by the Qahwa Tasks server on your computer.</p><textarea autoFocus required rows={5} value={pairingLink} onChange={(event) => setPairingLink(event.target.value)} placeholder="qahwa://pair?endpoint=…" /><button className="primary" disabled={busy || !pairingLink.trim()} type="submit"><Link2 />{busy ? "Pairing…" : "Pair securely"}</button><small>The server identity and this browser’s unique device key remain pinned for automatic reconnection.</small></form></main>;
+  }}><div className="coffee-mark">Q</div><span className="connection-kicker"><ShieldCheck />Private by design</span><h1>Pair with your Qahwa server</h1><p>Generate a one-time link on your computer, then paste it below. You only need to do this once.</p><label>One-time pairing link<textarea autoFocus required rows={4} value={pairingLink} onChange={(event) => setPairingLink(event.target.value)} placeholder="qahwa://pair?endpoint=…" /></label><button className="primary" disabled={busy || !pairingLink.trim()} type="submit"><Link2 />{busy ? "Pairing securely…" : "Pair this device"}</button><small><ShieldCheck /> End-to-end encrypted · server identity pinned to this device</small></form></main>;
 }
 
 function taskFromPath(): string | null {

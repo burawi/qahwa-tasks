@@ -1,4 +1,4 @@
-import { ArrowLeft, Eraser, Info, Maximize2, Minus, Pause, Play, Plus, Send, Sparkles } from "lucide-react";
+import { ArrowLeft, Bot, Eraser, Info, Maximize2, Minus, Network, Pause, Play, Plus, Send, Sparkles, UserRound, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -64,11 +64,14 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
   return <section className={mode === "task" ? "session-page" : "orchestrator-page"}>
     <header className="session-header">
       {onClose && <button type="button" className="icon-button" onClick={onClose} aria-label="Back"><ArrowLeft /></button>}
-      <div>
+      <span className={`session-avatar ${mode}`} aria-hidden="true">{mode === "task" ? <Bot /> : <Network />}</span>
+      <div className="session-title">
         <span>{mode === "task" ? task?.humanId ?? "Task" : "Orchestrator"}</span>
         <strong>{mode === "task" ? task?.title ?? "Loading…" : "Portfolio coordination"}</strong>
-        <small>{mode === "task" ? `${task?.projectName ?? ""} · ${workspace?.session.surface ?? "undecided"}` : capacity ? `${capacity.activeTurns}/${capacity.recommendedParallelism} safe slots active` : "Watching all tasks"}</small>
+        <small>{mode === "task" ? task?.projectName ?? "" : "A calm view across every task"}</small>
       </div>
+      {mode === "task" && workspace && <span className={`session-state run-${workspace.session.runState}`}><i />{workspace.session.runState === "not_started" ? "Not started" : workspace.session.runState}</span>}
+      {mode === "orchestrator" && capacity && <span className="capacity-pill"><i />{capacity.activeTurns} active <b>·</b> {capacity.availableSlots} available</span>}
       {mode === "task" && <button type="button" className="icon-button" onClick={() => setShowDetails(true)} aria-label="Task details"><Info /></button>}
       {running && <button type="button" className="icon-button warning" disabled={busy} onClick={() => void act(() => mode === "task" && taskId ? api.interruptTask(taskId) : api.interruptOrchestrator())} aria-label="Interrupt"><Pause /></button>}
       {mode === "orchestrator" && <button type="button" className="icon-button" disabled={busy || running} onClick={() => {
@@ -86,14 +89,14 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
     </div>}
 
     <div className="chat-stream">
-      {workspace?.messages.length === 0 && <div className="session-empty"><Sparkles /><h2>{mode === "task" ? "Ready when you are" : "Your planning partner"}</h2><p>{mode === "task" ? "This task has not started. Trigger it to let its Codex session inspect the note and decide whether it needs clarification, implementation, or a design canvas." : "Discuss priorities, dependencies, and which tasks should run together. The orchestrator watches status without taking over the task agents."}</p></div>}
+      {workspace?.messages.length === 0 && <div className="session-empty"><span className="empty-orb">{mode === "task" ? <Sparkles /> : <Network />}</span><span className="empty-kicker">{mode === "task" ? "Dedicated session" : "One clear overview"}</span><h2>{mode === "task" ? "Ready when you are" : "Plan the work, not every move"}</h2><p>{mode === "task" ? "Start this task when you want its session to understand the note, ask what is missing, and choose between a focused chat or design canvas." : "Discuss priorities, dependencies, and what can safely run together. The orchestrator watches progress and speaks up when something matters."}</p></div>}
       {workspace?.messages.map((entry) => <article key={entry.id} className={`chat-message ${entry.role}`}>
-        <div className="message-role">{entry.role === "assistant" ? mode === "task" ? "Codex" : "Orchestrator" : entry.role === "user" ? "You" : "System"}</div>
+        <span className="message-avatar" aria-hidden="true">{entry.role === "user" ? <UserRound /> : entry.role === "assistant" ? mode === "task" ? <Bot /> : <Network /> : <Info />}</span>
+        <div className="message-content"><div className="message-role">{entry.role === "assistant" ? mode === "task" ? "Task session" : "Orchestrator" : entry.role === "user" ? "You" : "System"}<time>{formatMessageTime(entry.createdAt)}</time></div>
         <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} components={{
           a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
           img: ({ ...props }) => <a href={props.src} target="_blank" rel="noreferrer"><img {...props} loading="lazy" /></a>,
-        }}>{entry.body}</ReactMarkdown></div>
-        <time>{new Date(entry.createdAt).toLocaleString()}</time>
+        }}>{entry.body}</ReactMarkdown></div></div>
       </article>)}
       {running && <div className="working-indicator"><span /><span /><span />{workspace?.session.runState === "waiting" ? "Waiting for you" : "Working"}</div>}
       {workspace?.pendingRequests.map((pending) => <PendingCard key={pending.id} pending={pending} onResolve={(body) => void act(() => api.respondToRequest(pending.id, body))} />)}
@@ -102,9 +105,9 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
 
     <form className="chat-composer" onSubmit={submit}>
       {mode === "task" && task?.status === "closed" ? <div className="closed-composer">Task {task.outcome}</div> : mode === "task" && workspace?.session.runState === "not_started" ? <button className="primary trigger-button" type="button" disabled={busy} onClick={() => taskId && void act(() => api.triggerTask(taskId))}><Play /> Trigger task</button> : <>
-        <textarea aria-label="Message" placeholder={running ? "Wait for this turn or interrupt it…" : "Message the session…"} value={message} onChange={(event) => setMessage(event.target.value)} disabled={running || busy} rows={1} onKeyDown={(event) => {
+        <div className="composer-field">{selectedDesignElement && <span className="canvas-selection">Canvas · {selectedDesignElement}<button type="button" onClick={() => setSelectedDesignElement(null)} aria-label="Clear selection"><X /></button></span>}<textarea aria-label="Message" placeholder={running ? "This session is working…" : mode === "task" ? "Ask, clarify, or guide this task…" : "Discuss priorities or ask for an update…"} value={message} onChange={(event) => setMessage(event.target.value)} disabled={running || busy} rows={1} onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
-        }} />
+        }} /></div>
         <button className="send-button" type="submit" disabled={running || busy || !message.trim()} aria-label="Send"><Send /></button>
       </>}
     </form>
@@ -116,6 +119,10 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
       onError={onError}
     />}
   </section>;
+}
+
+function formatMessageTime(value: string): string {
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function DesignCanvas({ workspace, onSelect }: { workspace: TaskWorkspace; onSelect: (selection: string | null) => void }) {
