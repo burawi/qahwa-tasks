@@ -252,6 +252,7 @@ export class AppDatabase {
   private migrate(): void {
     this.db.exec("DROP TABLE IF EXISTS notification_outbox");
     this.db.prepare("DELETE FROM app_settings WHERE key IN ('password_hash', 'setup_token')").run();
+    this.db.prepare("DELETE FROM sessions WHERE device_id IS NULL").run();
     const columns = new Set((this.db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>).map((row) => row.name));
     const additions = [
       ["logo_filename", "TEXT"],
