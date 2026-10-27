@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Download, LogOut, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, Download, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Project } from "../../domain/types";
 import { api } from "../api";
@@ -8,8 +8,12 @@ import { ProjectLogo } from "./ProjectLogo";
 
 export function ProjectManager({ onClose, onChanged, onError }: { onClose: () => void; onChanged: () => void; onError: (message: string) => void }) {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [devices, setDevices] = useState<Array<{ id: string; name: string; lastSeenAt: string; revokedAt: string | null }>>([]);
   const [editing, setEditing] = useState<Project | "new" | null>(null);
-  const load = async () => setProjects((await api.projects(true)).projects);
+  const load = async () => {
+    const [projectResult, deviceResult] = await Promise.all([api.projects(true), api.devices()]);
+    setProjects(projectResult.projects); setDevices(deviceResult.devices);
+  };
   useEffect(() => { void load(); }, []);
   const act = async (operation: () => Promise<unknown>) => {
     try { await operation(); await load(); onChanged(); setEditing(null); }
@@ -31,11 +35,11 @@ export function ProjectManager({ onClose, onChanged, onError }: { onClose: () =>
         </div>
       </article>)}
       <section className="settings-card">
-        <div><strong>Data & access</strong><small>Backups stay local. Exports are encrypted on this device.</small></div>
+        <div><strong>Paired devices</strong><small>Create a new one-time link on the Qahwa Tasks computer. Exports stay encrypted.</small></div>
         <button type="button" className="secondary" onClick={() => void encryptedExport(onError)}><Download />Encrypted export</button>
-        <button type="button" className="danger-subtle" onClick={() => {
-          if (window.confirm("Log out every trusted device?")) void api.revokeAll().then(() => window.location.assign("/"));
-        }}><LogOut />Log out all devices</button>
+        {devices.some((device) => !device.revokedAt) && <div className="paired-devices"><strong>Paired devices</strong>{devices.filter((device) => !device.revokedAt).map((device) => <span key={device.id}><span>{device.name}<small>Seen {new Date(device.lastSeenAt).toLocaleString()}</small></span><button type="button" className="danger-subtle" onClick={() => {
+          if (window.confirm(`Revoke ${device.name}?`)) void act(() => api.revokeDevice(device.id));
+        }}>Revoke</button></span>)}</div>}
       </section>
     </main>
     {editing && <ProjectForm project={editing === "new" ? undefined : editing} onCancel={() => setEditing(null)} onSave={(value, logo, removeLogo) => act(async () => {

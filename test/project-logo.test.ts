@@ -8,12 +8,12 @@ import { projectLogoValidationError } from "../src/web/project-logo.js";
 test("project logo UI uses a deterministic prefix fallback", () => {
   const fallback = renderToStaticMarkup(createElement(ProjectLogo, { logo: null, prefix: "QAH", size: "large" }));
   assert.match(fallback, />QAH</);
-  const image = renderToStaticMarkup(createElement(ProjectLogo, {
+  const pairedAssetPlaceholder = renderToStaticMarkup(createElement(ProjectLogo, {
     logo: { mimeType: "image/png", size: 68, updatedAt: "2026-10-17T12:00:00.000Z", url: "/api/projects/one/logo?v=1" },
     prefix: "QAH", size: "small",
   }));
-  assert.match(image, /<img src="\/api\/projects\/one\/logo\?v=1"/);
-  assert.match(image, /alt=""/);
+  assert.doesNotMatch(pairedAssetPlaceholder, /src="\/api\//);
+  assert.match(pairedAssetPlaceholder, />Q</);
 });
 
 test("project logo UI rejects unsupported, empty, and oversized files", () => {

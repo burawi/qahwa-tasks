@@ -3,6 +3,10 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskOutcome = "completed" | "cancelled" | null;
 export type Actor = "user" | "codex" | "system";
 export type CommentKind = "comment" | "handoff";
+export type TaskTone = "neutral" | "blue" | "green" | "orange" | "red";
+export type SessionSurface = "undecided" | "chat" | "design";
+export type SessionRunState = "not_started" | "idle" | "running" | "waiting" | "failed" | "interrupted";
+export type SessionOwnerType = "task" | "orchestrator";
 
 export interface RichTextNode {
   type?: string;
@@ -49,8 +53,64 @@ export interface TaskSummary {
   rank: number;
   unresolvedCommentCount: number;
   version: number;
+  smartMessage: string;
+  tone: TaskTone;
+  sessionState: SessionRunState;
+  surface: SessionSurface;
+  lastActivityAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  ownerType: SessionOwnerType;
+  ownerId: string;
+  role: "user" | "assistant" | "system";
+  body: string;
+  itemId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface AgentSession {
+  id: string;
+  ownerType: SessionOwnerType;
+  ownerId: string;
+  threadId: string | null;
+  activeTurnId: string | null;
+  surface: SessionSurface;
+  runState: SessionRunState;
+  generation: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PendingRequest {
+  id: string;
+  ownerType: SessionOwnerType;
+  ownerId: string;
+  requestType: "command" | "file_change" | "user_input" | "permissions" | "other";
+  payload: Record<string, unknown>;
+  status: "pending" | "approved" | "denied" | "answered" | "expired";
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface DesignDocument {
+  format: "web";
+  artboard: { width: number; height: number; background: string; name: string };
+  html: string;
+  css: string;
+}
+
+export interface TaskWorkspace {
+  session: AgentSession;
+  messages: ChatMessage[];
+  pendingRequests: PendingRequest[];
+  design: { document: DesignDocument; revision: number; updatedAt: string } | null;
+  designVersions: Array<{ id: string; name: string; document: DesignDocument; revision: number; createdAt: string }>;
 }
 
 export interface RelatedTask {

@@ -1,7 +1,7 @@
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileOutput, GitCommitHorizontal, History, MessageCircle, Pencil, Play, RotateCcw, Trash2, X } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import { documentFromPlainText, emptyDocument, type RelatedTask, type RichTextDocument, type TaskArtifact, type TaskComment, type TaskDetail as TaskDetailType, type TaskStatus } from "../../domain/types";
-import { api } from "../api";
+import { api, fetchEncryptedAsset } from "../api";
 import { projectColorStyle } from "../project-color";
 import { RichEditor, RichView } from "./RichEditor";
 import { ProjectLogo } from "./ProjectLogo";
@@ -173,37 +173,48 @@ export function CommitApprovalOutput({ approval, eligible, busy = false, onAppro
 
 export function ArtifactPreview({ artifact }: { artifact: TaskArtifact }) {
   const [requested, setRequested] = useState(artifact.previewKind === "image" && artifact.sourceType === "path");
-  const href = artifact.previewUrl;
-  const downloadHref = artifact.sourceType === "path" && href
-    ? `${href}${href.includes("?") ? "&" : "?"}download=1`
-    : href;
-  const canPreview = Boolean(href && artifact.previewKind !== "none");
+  const [secureHref, setSecureHref] = useState<string | null>(null);
+  const [assetError, setAssetError] = useState<string | null>(null);
+  const directHref = artifact.sourceType === "url" ? artifact.previewUrl : null;
+  useEffect(() => {
+    if (artifact.sourceType !== "path" || !artifact.previewUrl || artifact.availability !== "available") return;
+    let active = true;
+    let objectUrl: string | null = null;
+    void fetchEncryptedAsset(artifact.previewUrl).then((blob) => {
+      if (!active) return;
+      objectUrl = URL.createObjectURL(blob);
+      setSecureHref(objectUrl);
+    }).catch((error) => active && setAssetError(error instanceof Error ? error.message : "Asset unavailable"));
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [artifact.previewUrl, artifact.sourceType, artifact.availability]);
+  const href = directHref ?? secureHref;
+  const canPreview = Boolean(artifact.previewUrl && artifact.previewKind !== "none");
   return <article className={`artifact-card ${artifact.availability}`}>
-    {canPreview && requested && <ArtifactMedia artifact={artifact} />}
+    {canPreview && requested && href && <ArtifactMedia artifact={artifact} source={href} />}
     <div className="artifact-info">
       <strong>{artifact.filename}</strong>
       <small>{[artifact.mediaType ?? "Unknown type", formatBytes(artifact.size)].filter(Boolean).join(" · ")}</small>
       <code>{artifact.source}</code>
+      {assetError && <span className="artifact-placeholder">{assetError}</span>}
       {!canPreview && <span className="artifact-placeholder">{artifactMessage(artifact)}</span>}
     </div>
     <div className="artifact-actions">
       {canPreview && !requested && <button type="button" onClick={() => setRequested(true)}><Play />Preview</button>}
       {href && <a href={href} target="_blank" rel="noreferrer"><ExternalLink />Open</a>}
-      {downloadHref && <a href={downloadHref} download={artifact.sourceType === "url" ? undefined : artifact.filename}><Download />Download</a>}
+      {href && <a href={href} download={artifact.sourceType === "url" ? undefined : artifact.filename}><Download />Download</a>}
     </div>
   </article>;
 }
 
-function ArtifactMedia({ artifact }: { artifact: TaskArtifact }) {
-  if (!artifact.previewUrl) return null;
+function ArtifactMedia({ artifact, source }: { artifact: TaskArtifact; source: string }) {
   if (artifact.previewKind === "image") {
-    return <img className="artifact-preview" src={artifact.previewUrl} alt={artifact.filename} loading="lazy" decoding="async" />;
+    return <img className="artifact-preview" src={source} alt={artifact.filename} loading="lazy" decoding="async" />;
   }
   if (artifact.previewKind === "video") {
-    return <video className="artifact-preview" src={artifact.previewUrl} controls preload="metadata"><track kind="captions" /></video>;
+    return <video className="artifact-preview" src={source} controls preload="metadata"><track kind="captions" /></video>;
   }
   if (artifact.previewKind === "pdf") {
-    return <iframe className="artifact-preview pdf" src={artifact.previewUrl} title={`Preview ${artifact.filename}`} loading="lazy" />;
+    return <iframe className="artifact-preview pdf" src={source} title={`Preview ${artifact.filename}`} loading="lazy" />;
   }
   return null;
 }

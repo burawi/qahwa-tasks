@@ -86,24 +86,33 @@ export class AuthService {
     if (!encoded || !(await verifyPassword(password, encoded))) {
       throw new DomainError("Invalid password", "invalid_credentials", 401);
     }
+    const { token, expires } = this.createSession(request.headers["user-agent"] ?? null, request.ip);
+    this.setCookie(reply, token, expires);
+  }
+
+  createSession(userAgent: string | null, ipAddress: string | null, deviceId: string | null = null): { token: string; expires: Date } {
     const token = randomBytes(32).toString("base64url");
     const now = new Date();
     const expires = new Date(now.getTime() + this.sessionDays * 86_400_000);
     this.database.db.prepare(`
-      INSERT INTO sessions (token_hash, created_at, last_seen_at, expires_at, user_agent, ip_address)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(hashToken(token), now.toISOString(), now.toISOString(), expires.toISOString(), request.headers["user-agent"] ?? null, request.ip);
-    this.setCookie(reply, token, expires);
+      INSERT INTO sessions (token_hash, created_at, last_seen_at, expires_at, user_agent, ip_address, device_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(hashToken(token), now.toISOString(), now.toISOString(), expires.toISOString(), userAgent, ipAddress, deviceId);
+    return { token, expires };
   }
 
   logout(request: FastifyRequest, reply: FastifyReply): void {
-    const token = request.cookies[COOKIE_NAME];
+    const token = this.requestToken(request);
     if (token) this.database.db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hashToken(token));
     reply.clearCookie(COOKIE_NAME, { path: "/" });
   }
 
+  revokeToken(token: string): void {
+    this.database.db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hashToken(token));
+  }
+
   requireSession(request: FastifyRequest, reply: FastifyReply): SessionUser {
-    const token = request.cookies[COOKIE_NAME];
+    const token = this.requestToken(request);
     if (!token) throw new DomainError("Authentication required", "authentication_required", 401);
     const row = this.database.db.prepare("SELECT expires_at FROM sessions WHERE token_hash = ?").get(hashToken(token)) as
       | { expires_at: string }
@@ -144,6 +153,12 @@ export class AuthService {
       now.toISOString(), expires.toISOString(), hashToken(token),
     );
     this.setCookie(reply, token, expires);
+  }
+
+  private requestToken(request: FastifyRequest): string | undefined {
+    const authorization = request.headers.authorization;
+    if (authorization?.startsWith("Bearer ")) return authorization.slice(7).trim() || undefined;
+    return request.cookies[COOKIE_NAME];
   }
 
   private setCookie(reply: FastifyReply, token: string, expires: Date): void {

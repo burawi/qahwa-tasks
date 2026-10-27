@@ -3,6 +3,7 @@ import { join } from "node:path";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
+import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { DomainError } from "../domain/errors.js";
 import type { RichTextDocument, TaskStatus } from "../domain/types.js";
@@ -10,6 +11,8 @@ import { AuthService } from "./auth.js";
 import type { Config } from "./config.js";
 import { AppDatabase } from "./database.js";
 import { TaskService, type CreateTaskInput } from "./task-service.js";
+import { AgentService } from "./agent-service.js";
+import { PairingService } from "./pairing.js";
 
 const publicRoot = join(process.cwd(), "dist/public");
 const legacyScriptRecovery = `void async function(){try{for(const key of await caches.keys())if(key.startsWith("qahwa-tasks-"))await caches.delete(key);const registration=await navigator.serviceWorker?.getRegistration();await registration?.update()}finally{const url=new URL("/",location.origin);url.searchParams.set("recovered",Date.now().toString());location.replace(url)}}();`;
@@ -30,6 +33,7 @@ export interface AppContext {
   database: AppDatabase;
   auth: AuthService;
   tasks: TaskService;
+  agents: AgentService;
 }
 
 function booleanQuery(value: unknown): boolean {
@@ -42,9 +46,13 @@ export async function buildApp(config: Config, database = new AppDatabase(config
   app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_request, body, done) => done(null, body));
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
+  await app.register(websocket);
   const auth = new AuthService(database, config.sessionDays, config.publicBaseUrl.startsWith("https://"));
   const tasks = new TaskService(database);
-  const context: AppContext = { database, auth, tasks };
+  const agents = new AgentService(database, tasks);
+  const pairing = new PairingService(database, auth, config.publicBaseUrl);
+  const context: AppContext = { database, auth, tasks, agents };
+  pairing.register(app);
 
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("x-content-type-options", "nosniff");
@@ -103,8 +111,20 @@ export async function buildApp(config: Config, database = new AppDatabase(config
   });
 
   registerAuthRoutes(app, context);
+  app.get("/api/devices", async () => ({ devices: database.db.prepare(`
+    SELECT id, name, created_at AS createdAt, last_seen_at AS lastSeenAt, revoked_at AS revokedAt
+    FROM paired_devices ORDER BY created_at DESC
+  `).all() }));
+  app.post<{ Params: { id: string } }>("/api/devices/:id/revoke", async (request) => {
+    database.db.transaction(() => {
+      database.db.prepare("UPDATE paired_devices SET revoked_at = ? WHERE id = ?").run(new Date().toISOString(), request.params.id);
+      database.db.prepare("DELETE FROM sessions WHERE device_id = ?").run(request.params.id);
+    })();
+    return { revoked: true };
+  });
   registerProjectRoutes(app, context);
   registerTaskRoutes(app, context);
+  registerAgentRoutes(app, context);
   registerCommentRoutes(app, context);
 
   if (existsSync(publicRoot)) {
@@ -142,7 +162,10 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     return reply.code(500).send({ error: "internal_error", message: "Something went wrong" });
   });
 
-  app.addHook("onClose", async () => database.close());
+  app.addHook("onClose", async () => {
+    agents.close();
+    database.close();
+  });
   return app;
 }
 
@@ -202,7 +225,7 @@ function registerProjectRoutes(app: FastifyInstance, context: AppContext): void 
 }
 
 function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
-  app.get<{ Querystring: { tab?: "backlog" | "todo" | "open" | "closed"; projectId?: string } }>(
+  app.get<{ Querystring: { tab?: "all" | "active" | "backlog" | "todo" | "open" | "closed"; projectId?: string } }>(
     "/api/tasks", async (request) => ({ tasks: context.tasks.listTasks(request.query) }),
   );
   app.post<{ Body: CreateTaskInput }>("/api/tasks", async (request, reply) => {
@@ -276,6 +299,39 @@ function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
   app.get("/api/export", async (_request, reply) => reply
     .header("content-disposition", `attachment; filename="qahwa-tasks-${new Date().toISOString().slice(0, 10)}.json"`)
     .send(context.tasks.exportData()));
+}
+
+function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
+  app.get("/api/capacity", async () => ({ capacity: context.agents.capacity() }));
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/workspace", async (request) => ({
+    workspace: context.agents.workspace("task", request.params.id),
+  }));
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/trigger", async (request, reply) => {
+    const workspace = await context.agents.triggerTask(request.params.id);
+    return reply.code(202).send({ workspace });
+  });
+  app.post<{ Params: { id: string }; Body: { message: string } }>("/api/tasks/:id/messages", async (request, reply) => {
+    const workspace = await context.agents.send("task", request.params.id, request.body.message ?? "");
+    return reply.code(202).send({ workspace });
+  });
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/interrupt", async (request) => ({
+    workspace: await context.agents.interrupt("task", request.params.id),
+  }));
+  app.get("/api/orchestrator", async () => ({ workspace: context.agents.workspace("orchestrator", "main"), capacity: context.agents.capacity() }));
+  app.post<{ Body: { message: string } }>("/api/orchestrator/messages", async (request, reply) => {
+    const workspace = await context.agents.send("orchestrator", "main", request.body.message ?? "");
+    return reply.code(202).send({ workspace });
+  });
+  app.post("/api/orchestrator/interrupt", async () => ({
+    workspace: await context.agents.interrupt("orchestrator", "main"),
+  }));
+  app.post("/api/orchestrator/clean", async () => ({ workspace: await context.agents.cleanOrchestrator() }));
+  app.post<{ Params: { requestId: string }; Body: { approved?: boolean; answers?: Record<string, string> } }>(
+    "/api/session-requests/:requestId/respond", async (request) => {
+      await context.agents.resolveRequest(request.params.requestId, request.body);
+      return { resolved: true };
+    },
+  );
 }
 
 function registerCommentRoutes(app: FastifyInstance, context: AppContext): void {

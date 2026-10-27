@@ -22,6 +22,9 @@ import {
   type TaskArtifact,
   type TaskStatus,
   type TaskSummary,
+  type SessionRunState,
+  type SessionSurface,
+  type TaskTone,
 } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
 import { ReviewedCommitService, type StoredCommitProposal } from "./reviewed-commit.js";
@@ -37,6 +40,8 @@ interface TaskRow {
   project_logo_mime_type: ProjectLogo["mimeType"] | null; project_logo_size: number | null; project_logo_updated_at: string | null;
   root_directory: string; title: string; description_json: string; status: TaskStatus; outcome: TaskOutcome;
   rank: number; unresolved_comment_count: number; version: number; created_at: string; updated_at: string;
+  smart_message: string; tone: TaskTone; session_state: SessionRunState; surface: SessionSurface;
+  last_activity_at: string | null;
 }
 
 interface CommentRow {
@@ -68,6 +73,7 @@ const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   in_review: ["in_progress", "closed"],
   closed: [],
 };
+const TASK_LIST_STATUSES: readonly TaskStatus[] = ["backlog", "todo", "in_progress", "in_review", "closed"];
 
 function now(): string {
   return new Date().toISOString();
@@ -97,6 +103,8 @@ function taskFromRow(row: TaskRow): TaskSummary {
     projectPrefix: row.project_prefix, title: row.title, status: row.status, outcome: row.outcome,
     projectLogo: logoFromValues(row.project_id, row.project_logo_mime_type, row.project_logo_size, row.project_logo_updated_at),
     rank: row.rank, unresolvedCommentCount: Number(row.unresolved_comment_count), version: row.version,
+    smartMessage: row.smart_message, tone: row.tone, sessionState: row.session_state, surface: row.surface,
+    lastActivityAt: row.last_activity_at,
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
@@ -262,6 +270,9 @@ export class TaskService {
         INSERT INTO tasks (id, human_id, project_id, title, description_json, description_text, status, rank, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, humanId, input.projectId, title, JSON.stringify(description), plainTextFromDocument(description), status, rank, timestamp, timestamp);
+      this.database.db.prepare(`
+        INSERT INTO task_presence (task_id, message, tone, updated_at) VALUES (?, 'Not started', 'neutral', ?)
+      `).run(id, timestamp);
       this.database.db.prepare("UPDATE projects SET next_task_number = next_task_number + 1, updated_at = ? WHERE id = ?")
         .run(timestamp, input.projectId);
       this.saveVersion(id, 1, title, description, actor);
@@ -271,15 +282,25 @@ export class TaskService {
     return this.getTask(create());
   }
 
-  listTasks(options: { tab?: "backlog" | "todo" | "open" | "closed"; projectId?: string } = {}): TaskSummary[] {
-    const statuses = options.tab === "open" ? ["in_progress", "in_review"] : [options.tab ?? "backlog"];
+  listTasks(options: { tab?: "all" | "active" | "backlog" | "todo" | "open" | "closed"; projectId?: string } = {}): TaskSummary[] {
+    const statuses = options.tab === "all"
+      ? [...TASK_LIST_STATUSES]
+      : !options.tab
+        ? ["backlog"]
+      : options.tab === "active"
+        ? ["backlog", "todo", "in_progress", "in_review"]
+        : options.tab === "open" ? ["in_progress", "in_review"] : [options.tab];
     const params: unknown[] = [...statuses];
     let where = `t.status IN (${statuses.map(() => "?").join(",")})`;
     if (options.projectId) {
       where += " AND t.project_id = ?";
       params.push(options.projectId);
     }
-    const rows = this.database.db.prepare(`${this.taskSelect()} WHERE ${where} ORDER BY t.rank, t.created_at`).all(...params) as TaskRow[];
+    const order = options.tab === "all" || options.tab === "active"
+      ? `CASE t.status WHEN 'in_progress' THEN 0 WHEN 'in_review' THEN 1 WHEN 'todo' THEN 2 WHEN 'backlog' THEN 3 ELSE 4 END,
+        t.rank, t.created_at`
+      : "t.rank, t.created_at";
+    const rows = this.database.db.prepare(`${this.taskSelect()} WHERE ${where} ORDER BY ${order}`).all(...params) as TaskRow[];
     return rows.map(taskFromRow);
   }
 
@@ -571,8 +592,15 @@ export class TaskService {
     return `SELECT t.*, p.name AS project_name, p.prefix AS project_prefix, p.root_directory,
       p.logo_mime_type AS project_logo_mime_type, p.logo_size AS project_logo_size,
       p.logo_updated_at AS project_logo_updated_at,
+      COALESCE(tp.message, CASE WHEN t.status = 'closed' THEN 'Completed' ELSE 'Not started' END) AS smart_message,
+      COALESCE(tp.tone, CASE WHEN t.status = 'closed' AND t.outcome = 'completed' THEN 'green' ELSE 'neutral' END) AS tone,
+      COALESCE(s.run_state, 'not_started') AS session_state,
+      COALESCE(s.surface, 'undecided') AS surface,
+      s.updated_at AS last_activity_at,
       (SELECT COUNT(*) FROM comments c WHERE c.task_id = t.id AND c.kind = 'comment' AND c.parent_id IS NULL AND c.resolved_at IS NULL) AS unresolved_comment_count
-      FROM tasks t JOIN projects p ON p.id = t.project_id`;
+      FROM tasks t JOIN projects p ON p.id = t.project_id
+      LEFT JOIN task_presence tp ON tp.task_id = t.id
+      LEFT JOIN agent_sessions s ON s.owner_type = 'task' AND s.owner_id = t.id`;
   }
 
   private logoDirectory(): string {

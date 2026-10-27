@@ -13,6 +13,8 @@
     "mcp": "node dist/server/mcp/index.js",
     "auth:set-password": "tsx src/scripts/set-password.ts",
     "auth:send-setup-link": "node dist/server/scripts/send-setup-link.js",
+    "pair": "tsx src/scripts/create-pairing-link.ts",
+    "import:qahwa-design": "tsx src/scripts/import-qahwa-design.ts",
     "backup": "tsx src/scripts/backup.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit"
@@ -24,6 +26,7 @@
     "@fastify/cookie": "^11.0.2",
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/static": "^10.1.6",
+    "@fastify/websocket": "^11.3.4",
     "@modelcontextprotocol/sdk": "^1.24.3",
     "@tiptap/extension-highlight": "^3.10.7",
     "@tiptap/extension-link": "^3.10.7",
@@ -36,6 +39,11 @@
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.22.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -43,6 +51,7 @@
     "@types/node": "^22.19.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^5.1.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",

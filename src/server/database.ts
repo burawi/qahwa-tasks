@@ -108,13 +108,125 @@ CREATE TABLE IF NOT EXISTS activity (
 
 CREATE INDEX IF NOT EXISTS idx_activity_task ON activity(task_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  id TEXT PRIMARY KEY,
+  owner_type TEXT NOT NULL CHECK(owner_type IN ('task','orchestrator')),
+  owner_id TEXT NOT NULL,
+  thread_id TEXT,
+  active_turn_id TEXT,
+  surface TEXT NOT NULL DEFAULT 'undecided' CHECK(surface IN ('undecided','chat','design')),
+  run_state TEXT NOT NULL DEFAULT 'not_started' CHECK(run_state IN ('not_started','idle','running','waiting','failed','interrupted')),
+  generation INTEGER NOT NULL DEFAULT 1,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_type, owner_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_sessions_thread ON agent_sessions(thread_id) WHERE thread_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id TEXT PRIMARY KEY,
+  owner_type TEXT NOT NULL CHECK(owner_type IN ('task','orchestrator')),
+  owner_id TEXT NOT NULL,
+  codex_item_id TEXT,
+  role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+  body TEXT NOT NULL,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_item ON chat_messages(codex_item_id) WHERE codex_item_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chat_messages_owner ON chat_messages(owner_type, owner_id, created_at);
+
+CREATE TABLE IF NOT EXISTS session_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_type TEXT NOT NULL CHECK(owner_type IN ('task','orchestrator')),
+  owner_id TEXT NOT NULL,
+  thread_id TEXT,
+  turn_id TEXT,
+  item_id TEXT,
+  event_type TEXT NOT NULL,
+  payload_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_events_owner ON session_events(owner_type, owner_id, id);
+
+CREATE TABLE IF NOT EXISTS pending_requests (
+  id TEXT PRIMARY KEY,
+  owner_type TEXT NOT NULL CHECK(owner_type IN ('task','orchestrator')),
+  owner_id TEXT NOT NULL,
+  rpc_request_id TEXT,
+  request_type TEXT NOT NULL CHECK(request_type IN ('command','file_change','user_input','permissions','other')),
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','denied','answered','expired')),
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_requests_owner ON pending_requests(owner_type, owner_id, status);
+
+CREATE TABLE IF NOT EXISTS task_presence (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  message TEXT NOT NULL DEFAULT 'Not started',
+  tone TEXT NOT NULL DEFAULT 'neutral' CHECK(tone IN ('neutral','blue','green','orange','red')),
+  reason TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS design_documents (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  document_json TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS design_versions (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  document_json TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_design_versions_task ON design_versions(task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS scheduler_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  actor TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  capacity_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   user_agent TEXT,
-  ip_address TEXT
+  ip_address TEXT,
+  device_id TEXT REFERENCES paired_devices(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS paired_devices (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  public_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pairing_grants (
+  id TEXT PRIMARY KEY,
+  secret_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS notification_outbox (
@@ -168,6 +280,8 @@ export class AppDatabase {
     if (!outputColumns.has("commit_proposal_json")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN commit_proposal_json TEXT");
     if (!outputColumns.has("commit_approval_status")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN commit_approval_status TEXT");
     if (!outputColumns.has("approved_commit_hash")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN approved_commit_hash TEXT");
+    const sessionColumns = new Set((this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name));
+    if (!sessionColumns.has("device_id")) this.db.exec("ALTER TABLE sessions ADD COLUMN device_id TEXT REFERENCES paired_devices(id) ON DELETE CASCADE");
     this.migrateHandoffComments();
   }
 
