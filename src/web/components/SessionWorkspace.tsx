@@ -1,11 +1,12 @@
-import { ArrowLeft, Bot, Eraser, Info, Maximize2, Minus, Network, Pause, Play, Plus, Send, Sparkles, UserRound, X } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ArrowLeft, Bot, Eraser, Expand, Info, Maximize2, Minus, Network, Pause, Play, Plus, RotateCcw, Save, Send, Shrink, Sparkles, UserRound, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import type { TaskDetail, TaskWorkspace } from "../../domain/types";
 import { api } from "../api";
-import { TaskDetail as TaskDetailPanel } from "./TaskDetail";
+
+const TaskDetailPanel = lazy(() => import("./TaskDetail").then((module) => ({ default: module.TaskDetail })));
 
 interface Props {
   mode: "task" | "orchestrator";
@@ -70,7 +71,7 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
         <strong>{mode === "task" ? task?.title ?? "Loading…" : "Portfolio coordination"}</strong>
         <small>{mode === "task" ? task?.projectName ?? "" : "A calm view across every task"}</small>
       </div>
-      {mode === "task" && workspace && <span className={`session-state run-${workspace.session.runState}`}><i />{workspace.session.runState === "not_started" ? "Not started" : workspace.session.runState}</span>}
+      {mode === "task" && workspace && <span className={`session-state run-${workspace.session.runState}`}><i />{workspace.session.intakeState === "pending" && workspace.session.runState !== "not_started" ? "Clarifying scope" : workspace.session.runState === "not_started" ? "Not started" : workspace.session.runState}</span>}
       {mode === "orchestrator" && capacity && <span className="capacity-pill"><i />{capacity.activeTurns} active <b>·</b> {capacity.availableSlots} available</span>}
       {mode === "task" && <button type="button" className="icon-button" onClick={() => setShowDetails(true)} aria-label="Task details"><Info /></button>}
       {running && <button type="button" className="icon-button warning" disabled={busy} onClick={() => void act(() => mode === "task" && taskId ? api.interruptTask(taskId) : api.interruptOrchestrator())} aria-label="Interrupt"><Pause /></button>}
@@ -79,7 +80,7 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
       }} aria-label="Clean orchestrator"><Eraser /></button>}
     </header>
 
-    {mode === "task" && workspace?.session.surface === "design" && workspace.design && <DesignCanvas workspace={workspace} onSelect={setSelectedDesignElement} />}
+    {mode === "task" && taskId && workspace?.session.surface === "design" && workspace.design && <DesignCanvas workspace={workspace} taskId={taskId} onSelect={setSelectedDesignElement} onChanged={load} onError={onError} />}
     {mode === "task" && task && task.status !== "closed" && task.status !== "backlog" && <div className="session-actions">
       <span>{task.status.replace("_", " ")}</span>
       {task.status === "in_review" && <button type="button" className="primary" disabled={busy || running} onClick={() => void act(() => api.transition(task.id, "closed", "completed"))}>Mark completed</button>}
@@ -94,8 +95,8 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
         <span className="message-avatar" aria-hidden="true">{entry.role === "user" ? <UserRound /> : entry.role === "assistant" ? mode === "task" ? <Bot /> : <Network /> : <Info />}</span>
         <div className="message-content"><div className="message-role">{entry.role === "assistant" ? mode === "task" ? "Task session" : "Orchestrator" : entry.role === "user" ? "You" : "System"}<time>{formatMessageTime(entry.createdAt)}</time></div>
         <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} components={{
-          a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
-          img: ({ ...props }) => <a href={props.src} target="_blank" rel="noreferrer"><img {...props} loading="lazy" /></a>,
+          a: ({ href, ...props }) => <a {...props} href={href} target="_blank" rel="noopener noreferrer external" onClick={(event) => { if (!href) return; event.preventDefault(); window.open(href, "_blank", "noopener,noreferrer"); }} />,
+          img: ({ ...props }) => <a href={props.src} target="_blank" rel="noopener noreferrer external" onClick={(event) => { if (!props.src) return; event.preventDefault(); window.open(props.src, "_blank", "noopener,noreferrer"); }}><img {...props} loading="lazy" /></a>,
         }}>{entry.body}</ReactMarkdown></div></div>
       </article>)}
       {running && <div className="working-indicator"><span /><span /><span />{workspace?.session.runState === "waiting" ? "Waiting for you" : "Working"}</div>}
@@ -104,20 +105,20 @@ export function SessionWorkspace({ mode, taskId, onClose, onNavigateTask, onChan
     </div>
 
     <form className="chat-composer" onSubmit={submit}>
-      {mode === "task" && task?.status === "closed" ? <div className="closed-composer">Task {task.outcome}</div> : mode === "task" && workspace?.session.runState === "not_started" ? <button className="primary trigger-button" type="button" disabled={busy} onClick={() => taskId && void act(() => api.triggerTask(taskId))}><Play /> Trigger task</button> : <>
+      {mode === "task" && task?.status === "closed" ? <div className="closed-composer">Task {task.outcome}</div> : mode === "task" && workspace?.session.runState === "not_started" ? <button className="primary trigger-button" type="button" disabled={busy} onClick={() => taskId && void act(() => api.triggerTask(taskId))}><Play /> Clarify &amp; start</button> : <>
         <div className="composer-field">{selectedDesignElement && <span className="canvas-selection">Canvas · {selectedDesignElement}<button type="button" onClick={() => setSelectedDesignElement(null)} aria-label="Clear selection"><X /></button></span>}<textarea aria-label="Message" placeholder={running ? "This session is working…" : mode === "task" ? "Ask, clarify, or guide this task…" : "Discuss priorities or ask for an update…"} value={message} onChange={(event) => setMessage(event.target.value)} disabled={running || busy} rows={1} onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
         }} /></div>
         <button className="send-button" type="submit" disabled={running || busy || !message.trim()} aria-label="Send"><Send /></button>
       </>}
     </form>
-    {showDetails && taskId && <TaskDetailPanel
+    {showDetails && taskId && <Suspense fallback={<div className="screen-loading">Loading details…</div>}><TaskDetailPanel
       taskId={taskId}
       onClose={() => setShowDetails(false)}
       onNavigate={(humanId) => { setShowDetails(false); onNavigateTask?.(humanId); }}
       onChanged={() => { void load(); onChanged?.(); }}
       onError={onError}
-    />}
+    /></Suspense>}
   </section>;
 }
 
@@ -125,26 +126,45 @@ function formatMessageTime(value: string): string {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function DesignCanvas({ workspace, onSelect }: { workspace: TaskWorkspace; onSelect: (selection: string | null) => void }) {
+function DesignCanvas({ workspace, taskId, onSelect, onChanged, onError }: { workspace: TaskWorkspace; taskId: string; onSelect: (selection: string | null) => void; onChanged: () => Promise<void>; onError: (message: string) => void }) {
   const [zoom, setZoom] = useState(0.75);
   const [versionId, setVersionId] = useState("current");
+  const [fullscreen, setFullscreen] = useState(false);
+  const [selection, setSelection] = useState<string | null>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const gesture = useRef<{ mode: "pan" | "pinch"; distance: number; x: number; y: number; left: number; top: number; zoom: number } | null>(null);
   const design = workspace.design!;
   const selectedVersion = workspace.designVersions.find((version) => version.id === versionId);
   const document = selectedVersion?.document ?? design.document;
   const displayedRevision = selectedVersion?.revision ?? design.revision;
-  const source = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;min-height:100%;background:${document.artboard.background}}[data-qahwa-id]{cursor:pointer}[data-qahwa-selected]{outline:3px solid #2563eb!important;outline-offset:2px}${document.css}</style></head><body>${document.html}<script>document.addEventListener('click',function(event){var target=event.target.closest('[data-qahwa-id]');if(!target)return;event.preventDefault();document.querySelectorAll('[data-qahwa-selected]').forEach(function(node){node.removeAttribute('data-qahwa-selected')});target.setAttribute('data-qahwa-selected','');parent.postMessage({type:'qahwa-canvas-select',id:target.getAttribute('data-qahwa-id'),tag:target.tagName.toLowerCase(),text:(target.textContent||'').trim().slice(0,120)},'*')})<\/script></body></html>`;
+  const source = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>html,body{margin:0;min-height:100%;background:${document.artboard.background};touch-action:none;overscroll-behavior:none}[data-qahwa-id]{cursor:pointer}[data-qahwa-selected]{outline:3px solid #2563eb!important;outline-offset:2px}${document.css}</style></head><body>${document.html}<script>function point(t){return{x:t.clientX,y:t.clientY}}function distance(t){var a=t[0],b=t[1];return Math.hypot(b.clientX-a.clientX,b.clientY-a.clientY)}document.addEventListener('pointerdown',function(event){var target=event.target.closest('[data-qahwa-id]');if(!target)return;event.preventDefault();document.querySelectorAll('[data-qahwa-selected]').forEach(function(node){node.removeAttribute('data-qahwa-selected')});target.setAttribute('data-qahwa-selected','');parent.postMessage({type:'qahwa-canvas-select',id:target.getAttribute('data-qahwa-id'),tag:target.tagName.toLowerCase(),text:(target.textContent||target.getAttribute('alt')||'').trim().slice(0,160)},'*')},true);document.addEventListener('touchstart',function(e){e.preventDefault();if(e.touches.length>1)parent.postMessage({type:'qahwa-gesture-start',mode:'pinch',distance:distance(e.touches)},'*');else{var p=point(e.touches[0]);parent.postMessage({type:'qahwa-gesture-start',mode:'pan',x:p.x,y:p.y},'*')}},{passive:false});document.addEventListener('touchmove',function(e){e.preventDefault();if(e.touches.length>1)parent.postMessage({type:'qahwa-gesture-move',mode:'pinch',distance:distance(e.touches)},'*');else{var p=point(e.touches[0]);parent.postMessage({type:'qahwa-gesture-move',mode:'pan',x:p.x,y:p.y},'*')}},{passive:false});document.addEventListener('touchend',function(){parent.postMessage({type:'qahwa-gesture-end'},'*')})<\/script></body></html>`;
   useEffect(() => {
     const listener = (event: MessageEvent) => {
       const value = event.data as { type?: string; id?: string; tag?: string; text?: string };
-      if (value?.type === "qahwa-canvas-select" && value.id) onSelect(`${value.id} (${value.tag ?? "element"})${value.text ? `: ${value.text}` : ""}`);
+      if (event.source !== frameRef.current?.contentWindow) return;
+      if (value?.type === "qahwa-canvas-select" && value.id) { const selected = `${value.id} (${value.tag ?? "element"})${value.text ? `: ${value.text}` : ""}`; setSelection(selected); onSelect(selected); return; }
+      const data = event.data as { type?: string; mode?: "pan" | "pinch"; distance?: number; x?: number; y?: number };
+      const stage = stageRef.current;
+      if (!stage) return;
+      if (data.type === "qahwa-gesture-start" && data.mode) gesture.current = { mode: data.mode, distance: data.distance || 1, x: data.x || 0, y: data.y || 0, left: stage.scrollLeft, top: stage.scrollTop, zoom };
+      else if (data.type === "qahwa-gesture-move" && gesture.current?.mode === "pinch") setZoom(Math.min(1.5, Math.max(.25, gesture.current.zoom * (data.distance || gesture.current.distance) / gesture.current.distance)));
+      else if (data.type === "qahwa-gesture-move" && gesture.current?.mode === "pan") { stage.scrollLeft = gesture.current.left - ((data.x || 0) - gesture.current.x); stage.scrollTop = gesture.current.top - ((data.y || 0) - gesture.current.y); }
+      else if (data.type === "qahwa-gesture-end") gesture.current = null;
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
-  }, [onSelect]);
-  return <section className="design-panel">
-    <header><div><strong>{document.artboard.name}</strong><small>Revision {displayedRevision} · {document.artboard.width}×{document.artboard.height}</small></div>{workspace.designVersions.length > 0 && <select aria-label="Canvas version" value={versionId} onChange={(event) => { setVersionId(event.target.value); onSelect(null); }}><option value="current">Current</option>{workspace.designVersions.map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}</select>}<div className="canvas-controls"><button type="button" onClick={() => setZoom(Math.max(.25, zoom - .1))} aria-label="Zoom out"><Minus /></button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setZoom(Math.min(1.5, zoom + .1))} aria-label="Zoom in"><Plus /></button><button type="button" onClick={() => setZoom(.75)} aria-label="Fit canvas"><Maximize2 /></button></div></header>
-    <div className="design-stage"><iframe title={document.artboard.name} sandbox="allow-scripts" srcDoc={source} style={{ width: document.artboard.width * zoom, height: document.artboard.height * zoom }} /></div>
+  }, [onSelect, zoom]);
+  const run = async (operation: () => Promise<unknown>) => { try { await operation(); setVersionId("current"); await onChanged(); } catch (error) { onError(error instanceof Error ? error.message : "Canvas action failed"); } };
+  return <section className={`design-panel${fullscreen ? " fullscreen" : ""}`}>
+    <header><div><strong>{document.artboard.name}</strong><small>Revision {displayedRevision} · {document.artboard.width}×{document.artboard.height}{selection ? ` · ${selection.split(":")[0]}` : ""}</small></div><div className="canvas-version-controls">{workspace.designVersions.length > 0 && <select aria-label="Canvas version" value={versionId} onChange={(event) => { setVersionId(event.target.value); setSelection(null); onSelect(null); }}><option value="current">Current</option>{workspace.designVersions.map((version) => <option key={version.id} value={version.id}>{version.name}</option>)}</select>}<button type="button" onClick={() => { const name = window.prompt("Version name", `Revision ${displayedRevision}`); if (name) void run(() => api.createDesignVersion(taskId, name)); }} aria-label="Save version"><Save /></button>{versionId !== "current" && <button type="button" onClick={() => { if (window.confirm("Restore this version as the current canvas?")) void run(() => api.restoreDesignVersion(taskId, versionId)); }} aria-label="Restore version"><RotateCcw /></button>}</div><div className="canvas-controls"><button type="button" onClick={() => setZoom(Math.max(.25, zoom - .1))} aria-label="Zoom out"><Minus /></button><span>{Math.round(zoom * 100)}%</span><button type="button" onClick={() => setZoom(Math.min(1.5, zoom + .1))} aria-label="Zoom in"><Plus /></button><button type="button" onClick={() => setZoom(.75)} aria-label="Fit canvas"><Maximize2 /></button><button type="button" onClick={() => setFullscreen(!fullscreen)} aria-label={fullscreen ? "Exit full canvas" : "Open full canvas"}>{fullscreen ? <Shrink /> : <Expand />}</button></div></header>
+    {workspace.session.runState === "running" && <div className="canvas-activity"><span /><span /><span />{humanizeEvent(workspace.recentEvents.at(-1)?.type ?? "Working on canvas")}</div>}
+    <div className="design-stage" ref={stageRef}><iframe ref={frameRef} title={document.artboard.name} sandbox="allow-scripts" srcDoc={source} style={{ width: document.artboard.width * zoom, height: document.artboard.height * zoom }} /></div>
   </section>;
+}
+
+function humanizeEvent(value: string): string {
+  return value.replace(/[./_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function PendingCard({ pending, onResolve }: { pending: TaskWorkspace["pendingRequests"][number]; onResolve: (body: { approved?: boolean; answers?: Record<string, string> }) => void }) {

@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   surface TEXT NOT NULL DEFAULT 'undecided' CHECK(surface IN ('undecided','chat','design')),
   run_state TEXT NOT NULL DEFAULT 'not_started' CHECK(run_state IN ('not_started','idle','running','waiting','failed','interrupted')),
   generation INTEGER NOT NULL DEFAULT 1,
+  intake_state TEXT NOT NULL DEFAULT 'pending' CHECK(intake_state IN ('pending','ready')),
   last_error TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -203,6 +204,13 @@ CREATE TABLE IF NOT EXISTS scheduler_runs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scheduler_queue (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  requested_by TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
@@ -270,6 +278,8 @@ export class AppDatabase {
     if (!outputColumns.has("approved_commit_hash")) this.db.exec("ALTER TABLE task_outputs ADD COLUMN approved_commit_hash TEXT");
     const sessionColumns = new Set((this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name));
     if (!sessionColumns.has("device_id")) this.db.exec("ALTER TABLE sessions ADD COLUMN device_id TEXT REFERENCES paired_devices(id) ON DELETE CASCADE");
+    const agentColumns = new Set((this.db.prepare("PRAGMA table_info(agent_sessions)").all() as Array<{ name: string }>).map((row) => row.name));
+    if (!agentColumns.has("intake_state")) this.db.exec("ALTER TABLE agent_sessions ADD COLUMN intake_state TEXT NOT NULL DEFAULT 'pending'");
     this.migrateHandoffComments();
   }
 

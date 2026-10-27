@@ -3,12 +3,12 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import type { Project, TaskSummary } from "../domain/types";
 import { api, connection, type ConnectionState } from "./api";
 import { TaskCard } from "./components/TaskCard";
-import { SessionWorkspace } from "./components/SessionWorkspace";
 import { ProjectLogo } from "./components/ProjectLogo";
 import { preferredCreateProjectId, readLastCreateProjectId, writeLastCreateProjectId } from "./project-preference";
 
 const CreateTask = lazy(() => import("./components/CreateTask").then((module) => ({ default: module.CreateTask })));
 const ProjectManager = lazy(() => import("./components/ProjectManager").then((module) => ({ default: module.ProjectManager })));
+const SessionWorkspace = lazy(() => import("./components/SessionWorkspace").then((module) => ({ default: module.SessionWorkspace })));
 
 type View = "tasks" | "orchestrator";
 type Scope = "all" | "active" | "closed";
@@ -95,7 +95,7 @@ export function App() {
       </section>
       <div className="task-rows">{tasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => openTask(task)} />)}</div>
       {tasks.length === 0 && <div className="empty-state refined-empty"><span><Check /></span><h2>{scope === "all" && !projectId ? "A clear workspace" : "Nothing here yet"}</h2><p>{scope === "all" && !projectId ? "Add a quick note. Its session will help shape the work when you start it." : "No tasks match these filters."}</p>{scope === "all" && activeProjects.length > 0 && <button type="button" className="primary" onClick={() => setShowCreate(true)}><Plus />Create your first task</button>}</div>}
-    </main> : <SessionWorkspace mode="orchestrator" onError={fail} onChanged={() => void loadTasks()} />}
+    </main> : <Suspense fallback={<div className="screen-loading">Loading session…</div>}><SessionWorkspace mode="orchestrator" onError={fail} onChanged={() => void loadTasks()} /></Suspense>}
 
     {view === "tasks" && activeProjects.length > 0 && <button type="button" className="fab" onClick={() => setShowCreate(true)}><Plus /><span>New task</span></button>}
     <nav className="bottom-tabs two-tabs"><button type="button" className={view === "tasks" ? "active" : ""} onClick={() => selectView("tasks")}><ListTodo /><span>Tasks</span></button><button type="button" className={view === "orchestrator" ? "active" : ""} onClick={() => selectView("orchestrator")}><Network /><span>Orchestrator</span></button></nav>

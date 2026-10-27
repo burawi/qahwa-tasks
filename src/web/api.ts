@@ -282,6 +282,8 @@ export const api = {
     method: "POST", body: JSON.stringify({ message }),
   }),
   interruptTask: (id: string) => request<{ workspace: TaskWorkspace }>(`/api/tasks/${encodeURIComponent(id)}/interrupt`, { method: "POST" }),
+  createDesignVersion: (id: string, name: string) => request<{ workspace: TaskWorkspace }>(`/api/tasks/${encodeURIComponent(id)}/design/versions`, { method: "POST", body: JSON.stringify({ name }) }),
+  restoreDesignVersion: (id: string, versionId: string) => request<{ workspace: TaskWorkspace }>(`/api/tasks/${encodeURIComponent(id)}/design/versions/${encodeURIComponent(versionId)}/restore`, { method: "POST" }),
   orchestrator: () => request<{ workspace: TaskWorkspace; capacity: { activeTurns: number; recommendedParallelism: number; availableSlots: number } }>("/api/orchestrator"),
   sendOrchestratorMessage: (message: string) => request<{ workspace: TaskWorkspace }>("/api/orchestrator/messages", {
     method: "POST", body: JSON.stringify({ message }),

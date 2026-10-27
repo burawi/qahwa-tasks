@@ -287,6 +287,12 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   app.post<{ Params: { id: string } }>("/api/tasks/:id/interrupt", async (request) => ({
     workspace: await context.agents.interrupt("task", request.params.id),
   }));
+  app.post<{ Params: { id: string }; Body: { name?: string } }>("/api/tasks/:id/design/versions", async (request) => ({
+    workspace: context.agents.createDesignVersion(request.params.id, request.body.name ?? ""),
+  }));
+  app.post<{ Params: { id: string; versionId: string } }>("/api/tasks/:id/design/versions/:versionId/restore", async (request) => ({
+    workspace: context.agents.restoreDesignVersion(request.params.id, request.params.versionId),
+  }));
   app.get("/api/orchestrator", async () => ({ workspace: context.agents.workspace("orchestrator", "main"), capacity: context.agents.capacity() }));
   app.post<{ Body: { message: string } }>("/api/orchestrator/messages", async (request, reply) => {
     const workspace = await context.agents.send("orchestrator", "main", request.body.message ?? "");

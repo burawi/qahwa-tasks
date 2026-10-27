@@ -24,6 +24,19 @@ test("capacity recommendation protects small or memory-pressured machines", () =
   assert.equal(recommendedParallelism(4, 1024 ** 3, 8 * 1024 ** 3), 1);
   assert.equal(recommendedParallelism(4, 4 * 1024 ** 3, 8 * 1024 ** 3), 2);
   assert.equal(recommendedParallelism(12, 16 * 1024 ** 3, 32 * 1024 ** 3), 4);
+  assert.equal(recommendedParallelism(12, 16 * 1024 ** 3, 32 * 1024 ** 3, 11), 1);
+});
+
+test("agent envelope extracts intake, silent supervision, and structured orchestrator controls", () => {
+  const response = parseAgentEnvelope(`No user-facing update.\n<!-- qahwa-intake:{"ready":true} -->\n<!-- qahwa-silent -->\n<!-- qahwa-actions:[{"type":"start","taskId":"was-0001"},{"type":"message","taskId":"QAH-0002","message":"Check the failing test"},{"type":"interrupt","taskId":"MAJ-0003"},{"type":"priority","taskIds":["MAJ-0003","WAS-0001"]}] -->`);
+  assert.equal(response.intakeReady, true);
+  assert.equal(response.silent, true);
+  assert.deepEqual(response.actions, [
+    { type: "start", taskId: "WAS-0001" },
+    { type: "message", taskId: "QAH-0002", message: "Check the failing test" },
+    { type: "interrupt", taskId: "MAJ-0003" },
+    { type: "priority", taskIds: ["MAJ-0003", "WAS-0001"] },
+  ]);
 });
 
 test("spawned Codex sessions cannot inherit Orca routing or parent session identity", () => {

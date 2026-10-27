@@ -388,6 +388,7 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in
 .pending-card { padding: 14px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line)); border-radius: 15px; background: var(--yellow-soft); }
 .pending-card p { margin: 0; overflow-wrap: anywhere; }
 .design-panel { min-height: 200px; max-height: 44dvh; padding: 10px 14px; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 8px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.design-panel:has(.canvas-activity) { grid-template-rows: auto auto minmax(0, 1fr); }
 .design-panel > header { width: min(100%, 820px); margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .design-panel > header > div:first-child { display: grid; }
 .design-panel small { color: var(--muted); }
@@ -397,6 +398,14 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in
 .canvas-controls button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); }
 .canvas-controls svg { width: 15px; }
 .canvas-controls span { min-width: 44px; text-align: center; font-size: 12px; color: var(--muted); }
+.canvas-version-controls { display: flex; align-items: center; gap: 5px; }
+.canvas-version-controls select { min-width: 120px; }
+.canvas-version-controls button { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border: 1px solid #41463c; border-radius: 8px; background: #2d312a; color: #f5f2e9; }
+.canvas-version-controls svg { width: 15px; }
+.canvas-activity { width: min(100%, 820px); margin: 0 auto; display: flex; align-items: center; gap: 5px; color: #c6cbc0; font-size: 10px; }
+.canvas-activity span { width: 5px; height: 5px; border-radius: 50%; background: #86bad1; animation: agent-pulse 1.2s infinite; }
+.canvas-activity span:nth-child(2) { animation-delay: .15s; }.canvas-activity span:nth-child(3) { animation-delay: .3s; margin-right: 3px; }
+.design-panel.fullscreen { position: fixed; z-index: 90; inset: 0; max-height: none; min-height: 100dvh; padding-top: calc(12px + env(safe-area-inset-top)); padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 
 @media (min-width: 760px) {
   .unified-task-list { padding-top: 18px; }

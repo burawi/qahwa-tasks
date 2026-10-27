@@ -53,3 +53,27 @@ test("paired API serves task-scoped artifacts and rejects cross-task access", as
     assert.equal((await app.inject({ method: "GET", url: path.replace(task.id, other.id), headers })).statusCode, 404);
   } finally { await app.close(); }
 });
+
+test("paired task sessions save named canvas versions and restore them safely", async () => {
+  const { config, database, root, tasks, headers } = fixture();
+  const project = tasks.createProject({ name: "Canvas", prefix: "CAN", rootDirectory: root }, "user");
+  const task = tasks.createTask({ projectId: project.id, title: "Design", status: "todo" }, "user");
+  const original = { format: "web", artboard: { width: 390, height: 844, background: "#fff", name: "Original" }, html: '<main data-qahwa-id="root">Original</main>', css: "main{padding:20px}" };
+  database.db.prepare("INSERT INTO design_documents(task_id, document_json, revision, updated_at) VALUES (?, ?, 1, ?)")
+    .run(task.id, JSON.stringify(original), new Date().toISOString());
+  const app = await buildApp(config, database);
+  try {
+    const humanWorkspace = await app.inject({ method: "GET", url: `/api/tasks/${task.humanId}/workspace`, headers });
+    assert.equal(humanWorkspace.statusCode, 200);
+    assert.equal(humanWorkspace.json().workspace.session.ownerId, task.id);
+    const saved = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/design/versions`, headers, payload: { name: "Approved direction" } });
+    assert.equal(saved.statusCode, 200);
+    const versionId = saved.json().workspace.designVersions[0].id as string;
+    database.db.prepare("UPDATE design_documents SET document_json = ?, revision = 2 WHERE task_id = ?")
+      .run(JSON.stringify({ ...original, artboard: { ...original.artboard, name: "Changed" } }), task.id);
+    const restored = await app.inject({ method: "POST", url: `/api/tasks/${task.id}/design/versions/${versionId}/restore`, headers });
+    assert.equal(restored.statusCode, 200);
+    assert.equal(restored.json().workspace.design.document.artboard.name, "Original");
+    assert.equal(restored.json().workspace.design.revision, 3);
+  } finally { await app.close(); }
+});

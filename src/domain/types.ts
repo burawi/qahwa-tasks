@@ -7,6 +7,7 @@ export type TaskTone = "neutral" | "blue" | "green" | "orange" | "red";
 export type SessionSurface = "undecided" | "chat" | "design";
 export type SessionRunState = "not_started" | "idle" | "running" | "waiting" | "failed" | "interrupted";
 export type SessionOwnerType = "task" | "orchestrator";
+export type TaskIntakeState = "pending" | "ready";
 
 export interface RichTextNode {
   type?: string;
@@ -82,6 +83,7 @@ export interface AgentSession {
   surface: SessionSurface;
   runState: SessionRunState;
   generation: number;
+  intakeState: TaskIntakeState;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
@@ -111,6 +113,7 @@ export interface TaskWorkspace {
   pendingRequests: PendingRequest[];
   design: { document: DesignDocument; revision: number; updatedAt: string } | null;
   designVersions: Array<{ id: string; name: string; document: DesignDocument; revision: number; createdAt: string }>;
+  recentEvents: Array<{ type: string; createdAt: string }>;
 }
 
 export interface RelatedTask {
