@@ -215,7 +215,8 @@ export function hasCurrentUserAuthorization(userMessage: string | undefined, exa
 }
 
 export function hasStandingDirectiveAuthorization(directive: OrchestratorDirective | null, directiveId: string | undefined, exactQuote: string): boolean {
-  return Boolean(directive && directiveId === directive.id && exactQuote && directive.sourceQuote.includes(exactQuote));
+  return Boolean(directive && directiveId === directive.id && exactQuote
+    && (directive.sourceQuote.includes(exactQuote) || directive.instruction.includes(exactQuote)));
 }
 
 export function buildTaskImplementationHandoff(task: { humanId: string; projectName: string; title: string; description: unknown }, messages: Array<{ role: string; body: string }>): string {

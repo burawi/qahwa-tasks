@@ -58,6 +58,7 @@ test("orchestrator actions require evidence from the current user turn, not keyw
 test("standing directives authorize only their exact id and source quote", () => {
   const directive = { id: "directive-1", instruction: "Continue priority work when capacity is safe", sourceQuote: "continue the work once this task is done", createdAt: "2026-10-27T00:00:00.000Z" };
   assert.equal(hasStandingDirectiveAuthorization(directive, "directive-1", "continue the work"), true);
+  assert.equal(hasStandingDirectiveAuthorization(directive, "directive-1", "when capacity is safe"), true);
   assert.equal(hasStandingDirectiveAuthorization(directive, "directive-2", "continue the work"), false);
   assert.equal(hasStandingDirectiveAuthorization(directive, "directive-1", "deploy everything"), false);
 });
