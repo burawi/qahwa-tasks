@@ -118,6 +118,19 @@ export function recommendedParallelism(logicalCpus = cpus().length, freeBytes = 
   return loadRatio >= .85 ? 1 : loadRatio >= .6 ? Math.max(1, baseline - 1) : baseline;
 }
 
+export function orchestratorAuthorizations(text: string, isUserMessage = true): { start: boolean; priority: boolean; control: boolean } {
+  if (!isUserMessage) return { start: false, priority: false, control: false };
+  const explicitStart = /\b(start|run|trigger|launch|execute)\b[\s\S]{0,100}\b([A-Z]{2,10}-\d{4}|tasks?|work)\b/i.test(text)
+    || /\b(you decide|use your judgment)\b[\s\S]{0,80}\b(start|run|tasks?|work)\b/i.test(text);
+  const contextualStart = /\b(make|do|take|handle|work on|proceed with|go with|begin)\b[\s\S]{0,100}\b(the\s+)?(first|second|third|next|last|one|task|[A-Z]{2,10}-\d{4})\b/i.test(text)
+    || /^\s*(yes|go ahead|do it|proceed|continue|the first one|first one)\b/i.test(text);
+  return {
+    start: explicitStart || contextualStart,
+    priority: /\b(prioriti[sz]e|priority|reorder|order)\b/i.test(text),
+    control: /\b(check|inspect|ask|tell|message|update|follow up|pause|stop|interrupt|redirect|guide)\b/i.test(text),
+  };
+}
+
 export function parseAgentEnvelope(text: string): {
   body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean;
   startTasks: string[]; priorityTasks: string[]; intakeReady?: boolean; silent: boolean; actions: OrchestratorAction[];
@@ -375,13 +388,10 @@ export class AgentService {
       assertDomain(task.status !== "closed", "Closed tasks cannot receive new work", "task_closed", 409);
       if (task.status === "in_review") this.tasks.transition(task.id, { to: "in_progress" }, "codex");
     } else {
-      this.orchestratorStartAuthorized = messageRole === "user" && (
-        /\b(start|run|trigger|launch|execute)\b[\s\S]{0,100}\b[A-Z]{2,10}-\d{4}\b/i.test(text)
-        || /\b(start|run|trigger|launch|execute)\b[\s\S]{0,80}\b(tasks?|work)\b/i.test(text)
-        || /\b(you decide|use your judgment)\b[\s\S]{0,80}\b(start|run|tasks?|work)\b/i.test(text)
-      );
-      this.orchestratorPriorityAuthorized = messageRole === "user" && /\b(prioriti[sz]e|priority|reorder|order)\b/i.test(text);
-      this.orchestratorControlAuthorized = messageRole === "user" && /\b(check|inspect|ask|tell|message|update|follow up|pause|stop|interrupt|redirect|guide)\b/i.test(text);
+      const authorization = orchestratorAuthorizations(text, messageRole === "user");
+      this.orchestratorStartAuthorized = authorization.start;
+      this.orchestratorPriorityAuthorized = authorization.priority;
+      this.orchestratorControlAuthorized = authorization.control;
     }
     this.addMessage(ownerType, ownerId, messageRole, text);
     this.updateSession(ownerType, ownerId, { runState: "running", lastError: null });
@@ -491,7 +501,7 @@ export class AgentService {
     const envelope = `At the end of every response, append exactly one hidden marker: <!-- qahwa:{"message":"short task-list status under 7 words","tone":"neutral|blue|green|orange|red","surface":"chat|design","review":false} -->. Use green for a good completed/result state, red for failure/blocker, orange for warning or clarification needed, blue for active progress, neutral for dormant context. Set review true only when implementation and proportionate validation are complete and the task is genuinely ready for user review. Never claim completion without evidence.`;
     if (ownerType === "orchestrator") {
       const capacity = this.capacity();
-      return `You are Qahwa's single supervisory orchestration session. Collaborate with the user on priorities and monitor the portfolio without micromanaging. You can inspect the supplied task conversations, pending requests, outputs and recent activity. Speak proactively only when the user needs to know or decide something; for irrelevant automated observations append <!-- qahwa-silent --> and no visible response. Capacity: ${JSON.stringify(capacity)}. Portfolio: ${JSON.stringify(this.orchestratorSnapshot())}. To act, append exactly one hidden JSON array: <!-- qahwa-actions:[{"type":"start","taskId":"ID-0001"},{"type":"priority","taskIds":["ID-0001"]},{"type":"message","taskId":"ID-0001","message":"instruction"},{"type":"interrupt","taskId":"ID-0001"}] --> containing only required actions. Start and priority actions require the user's authorization in this turn. Message or interrupt actions require an explicit request to inspect, guide, ask, pause, or redirect tasks. Never manufacture authorization. Avoid starting tasks from the same project concurrently because their worktrees may conflict. ${envelope}\n\nConversation input: ${userText}`;
+      return `You are Qahwa's single supervisory orchestration session. Collaborate with the user on priorities and monitor the portfolio without micromanaging. You can inspect the supplied task conversations, pending requests, outputs and recent activity. Speak proactively only when the user needs to know or decide something; for irrelevant automated observations append <!-- qahwa-silent --> and no visible response. Capacity: ${JSON.stringify(capacity)}. Portfolio: ${JSON.stringify(this.orchestratorSnapshot())}. To act, append exactly one hidden JSON array: <!-- qahwa-actions:[{"type":"start","taskId":"ID-0001"},{"type":"priority","taskIds":["ID-0001"]},{"type":"message","taskId":"ID-0001","message":"instruction"},{"type":"interrupt","taskId":"ID-0001"}] --> containing only required actions. Start and priority actions require the user's authorization in this turn. Message or interrupt actions require an explicit request to inspect, guide, ask, pause, or redirect tasks. Never manufacture authorization. Never claim that an action succeeded in your prose: the application replaces action responses with the backend's authoritative result. Avoid starting tasks from the same project concurrently because their worktrees may conflict. ${envelope}\n\nConversation input: ${userText}`;
     }
     const task = this.tasks.getTask(ownerId);
     const workspace = this.workspace("task", ownerId);
@@ -581,7 +591,7 @@ export class AgentService {
   private finishAgentMessage(owner: Owner, itemId: string, raw: string): void {
     const parsed = parseAgentEnvelope(raw);
     const body = parsed.body || "Done.";
-    if (!parsed.silent) this.addMessage(owner.ownerType, owner.ownerId, "assistant", body, null, itemId);
+    if (!parsed.silent && !(owner.ownerType === "orchestrator" && parsed.actions.length)) this.addMessage(owner.ownerType, owner.ownerId, "assistant", body, null, itemId);
     if (owner.ownerType === "task") {
       const session = this.ensureSession("task", owner.ownerId);
       if (session.intakeState === "pending") {
@@ -609,15 +619,21 @@ export class AgentService {
         this.orchestratorObservations.push(`${task.humanId} (${task.projectName}) changed to ${parsed.tone}: ${parsed.message ?? "Status changed"}.`);
       }
     }
-    if (owner.ownerType === "orchestrator" && parsed.actions.length) void this.applyOrchestratorActions(parsed.actions);
+    if (owner.ownerType === "orchestrator" && parsed.actions.length) {
+      void this.applyOrchestratorActions(parsed.actions).then((outcomes) => {
+        if (!parsed.silent) this.addMessage("orchestrator", "main", "assistant", outcomes.join("\n"), null, itemId);
+      });
+    }
   }
 
-  private async applyOrchestratorActions(actions: OrchestratorAction[]): Promise<void> {
+  private async applyOrchestratorActions(actions: OrchestratorAction[]): Promise<string[]> {
     // Capture the authorization for the current orchestrator turn before the
     // turn/completed notification clears it while an earlier action awaits.
     const startAuthorized = this.orchestratorStartAuthorized;
     const priorityAuthorized = this.orchestratorPriorityAuthorized;
     const controlAuthorized = this.orchestratorControlAuthorized;
+    const outcomes: string[] = [];
+    const requestedStarts: string[] = [];
     for (const action of actions) {
       try {
         if (action.type === "start") {
@@ -625,24 +641,31 @@ export class AgentService {
           const task = this.tasks.getTask(action.taskId);
           this.database.db.prepare(`INSERT INTO scheduler_queue(task_id, requested_by, reason, created_at) VALUES (?, 'orchestrator', ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason, created_at=excluded.created_at`).run(task.id, "Authorized by the user through the orchestrator", isoNow());
+          requestedStarts.push(task.humanId);
         } else if (action.type === "priority") {
           if (!priorityAuthorized) throw new Error("The user did not authorize changing priority in this turn");
           this.tasks.prioritize(action.taskIds, "system");
-          this.addMessage("orchestrator", "main", "system", `Priority updated: ${action.taskIds.join(" → ")}.`);
+          outcomes.push(`Priority updated: ${action.taskIds.join(" → ")}.`);
         } else if (action.type === "message") {
           if (!controlAuthorized) throw new Error("The user did not authorize directing task sessions in this turn");
           await this.messageTask(action.taskId, action.message);
-          this.addMessage("orchestrator", "main", "system", `Sent guidance to ${action.taskId}.`);
+          outcomes.push(`Guidance sent to ${action.taskId}.`);
         } else if (action.type === "interrupt") {
           if (!controlAuthorized) throw new Error("The user did not authorize interrupting task sessions in this turn");
           await this.interrupt("task", this.tasks.getTask(action.taskId).id);
-          this.addMessage("orchestrator", "main", "system", `Interrupted ${action.taskId}.`);
+          outcomes.push(`${action.taskId} was interrupted.`);
         }
       } catch (error) {
-        this.addMessage("orchestrator", "main", "system", `${action.type} ${"taskId" in action ? action.taskId : "tasks"} was not applied: ${error instanceof Error ? error.message : String(error)}`);
+        outcomes.push(`${action.type} ${"taskId" in action ? action.taskId : "tasks"} was not applied: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    await this.drainSchedulerQueue();
+    await this.drainSchedulerQueue(false);
+    for (const humanId of requestedStarts) {
+      const task = this.tasks.getTask(humanId);
+      const queued = this.database.db.prepare("SELECT 1 FROM scheduler_queue WHERE task_id = ?").get(task.id);
+      outcomes.push(queued ? `${humanId} is queued and will start when capacity and its worktree are available.` : `${humanId} started.`);
+    }
+    return outcomes.length ? outcomes : ["No action was applied."];
   }
 
   private async messageTask(taskId: string, message: string): Promise<void> {
@@ -657,7 +680,7 @@ export class AgentService {
     await this.send("task", task.id, `Orchestrator guidance authorized by the user: ${message}`, false, "system");
   }
 
-  private async drainSchedulerQueue(): Promise<void> {
+  private async drainSchedulerQueue(announce = true): Promise<void> {
     const queued = this.database.db.prepare(`SELECT q.task_id, q.requested_by FROM scheduler_queue q JOIN tasks t ON t.id=q.task_id ORDER BY t.rank, q.created_at`).all() as Array<{ task_id: string; requested_by: string }>;
     for (const row of queued) {
       if (this.capacity().availableSlots <= 0) return;
@@ -666,9 +689,9 @@ export class AgentService {
       try {
         if (row.requested_by === "intake") await this.beginImplementation(task.id);
         else await this.triggerTask(task.id, "orchestrator");
-        this.addMessage("orchestrator", "main", "system", `${task.humanId} ${row.requested_by === "intake" ? "finished intake and began implementation" : "started"}.`);
+        if (announce) this.addMessage("orchestrator", "main", "system", `${task.humanId} ${row.requested_by === "intake" ? "finished intake and began implementation" : "started"}.`);
       } catch (error) {
-        this.addMessage("orchestrator", "main", "system", `${task.humanId} remains queued: ${error instanceof Error ? error.message : String(error)}`);
+        if (announce) this.addMessage("orchestrator", "main", "system", `${task.humanId} remains queued: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }

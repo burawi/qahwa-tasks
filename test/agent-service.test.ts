@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isolatedCodexEnvironment, parseAgentEnvelope, recommendedParallelism } from "../src/server/agent-service.js";
+import { isolatedCodexEnvironment, orchestratorAuthorizations, parseAgentEnvelope, recommendedParallelism } from "../src/server/agent-service.js";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
   const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
@@ -46,4 +46,11 @@ test("spawned Codex sessions cannot inherit Orca routing or parent session ident
     CODEX_TOOL_CALL_ID: "call", INVOCATION_ID: "invocation",
   });
   assert.deepEqual(environment, { PATH: "/bin" });
+});
+
+test("orchestrator recognizes contextual start authorization without authorizing system observations", () => {
+  assert.equal(orchestratorAuthorizations("make the first one in your list only").start, true);
+  assert.equal(orchestratorAuthorizations("go ahead").start, true);
+  assert.equal(orchestratorAuthorizations("How would you handle them?").start, false);
+  assert.deepEqual(orchestratorAuthorizations("start WAS-0004", false), { start: false, priority: false, control: false });
 });
