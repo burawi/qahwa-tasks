@@ -1,78 +1,177 @@
-# Qahwa Tasks
+<p align="center">
+  <img src="public/icons/qahwa-violet-v1-192.png" alt="Qahwa Tasks logo" width="72">
+</p>
 
-Private, mobile-first task coordination between Burawi and persistent Codex sessions.
+<h1 align="center">Qahwa Tasks</h1>
 
-The app has two surfaces:
+<p align="center">Self-hosted task management and persistent Codex workspaces.</p>
 
-- **Tasks** — one project-filterable vertical list. A task is only a note until the user or orchestrator triggers it. Each task then owns a durable Codex thread and chooses chat or an embedded HTML/CSS design canvas.
-- **Orchestrator** — a full Codex session with portfolio awareness: it can research, code, investigate, operate services, and create or manage tasks through the configured tools, alongside prioritization, capacity-aware parallel starts, and material status updates from task sessions.
+<p align="center">
+  <img src=".github/assets/badge-node.svg" alt="Requires Node.js 22 or later">
+  <img src=".github/assets/badge-typescript.svg" alt="TypeScript and React">
+  <img src=".github/assets/badge-sqlite.svg" alt="SQLite storage">
+  <img src=".github/assets/badge-hosting.svg" alt="Self-hosted application">
+</p>
 
-Chats render GitHub-flavored Markdown, tables, safe links, and image previews. Task agents maintain the short status and semantic color shown in the list.
+Qahwa Tasks is a web application for managing development tasks and their agent sessions on your own host. Each task has a persistent conversation, project context, and an explicit file-access mode. A separate orchestrator session coordinates work across projects.
+
+The server runs alongside your repositories and Codex CLI. You connect through a paired browser or installed PWA.
+
+[Installation](#installation) · [Configuration](#configuration) · [Architecture](#architecture) · [Development](#development) · [Contributing](.github/CONTRIBUTING.md)
+
+## Screenshots
+
+<img src=".github/assets/workspace-dark.png" alt="Desktop task list in dark mode, showing project filters, task states, and conversation previews." width="100%">
+
+<details>
+<summary>Mobile orchestrator · light theme</summary>
+
+<p align="center">
+  <img src=".github/assets/chat-mobile.png" alt="Orchestrator conversation and message composer on a mobile screen." width="300">
+</p>
+
+</details>
+
+Screenshots show the application with synthetic fixture data, not production conversations.
+
+## Features
+
+- **Project tasks:** task lists, search, conversation previews, and review states.
+- **Persistent sessions:** task-specific Codex threads and a cross-project orchestrator.
+- **Workspace surfaces:** chat, HTML/CSS design canvases, and terminal sessions.
+- **Messages and scheduling:** attachments, voice messages, task schedules, and follow-up messages.
+- **Device access:** one-time pairing, device revocation, and per-task idle notifications.
+- **Web interface:** responsive layouts, light/dark themes, and an installable PWA.
+
+## Installation
+
+### Requirements
+
+- Node.js **22 or later** and npm.
+- A configured Codex CLI on the server, available as `codex`. Qahwa launches `codex app-server` for agent sessions.
+- A native build toolchain if prebuilt binaries for `better-sqlite3` or `node-pty` are unavailable on your platform.
+
+The supplied deployment configuration targets a Linux host. Other operating systems have not been validated as part of this documentation update.
+
+### Local development
+
+```bash
+git clone https://github.com/burawi/qahwa-tasks.git
+cd qahwa-tasks
+npm ci
+npm run dev
+```
+
+Start the frontend in a second terminal:
+
+```bash
+npm run dev:web
+```
+
+Open the URL printed by Vite. Development API requests are proxied to the backend at `127.0.0.1:3022`.
+
+### Pair a browser
+
+With the same environment and data directory as the backend, run:
+
+```bash
+npm run pair
+```
+
+This writes a one-time link to `<DATA_DIR>/pairing-link`. Copy the link into the application's pairing screen. Links expire after 15 minutes; keep their contents private.
+
+### Production build
+
+```bash
+npm run build
+npm start
+```
+
+The compiled server listens on `127.0.0.1:3022` by default. For remote access, configure an HTTPS reverse proxy and set `PUBLIC_BASE_URL` to your public address.
+
+See [Operations](.github/OPERATIONS.md) for pairing, backups, and host configuration. The supplied process-manager configuration and `pair:production` command contain settings specific to the original installation; adapt them before use.
+
+## Configuration
+
+Settings are read from the **process environment**. `.env` files are not automatically loaded. The [example file](.env.example) contains the original host's settings, rather than portable defaults.
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `HOST` | `127.0.0.1` | Backend bind address |
+| `PORT` | `3022` | Backend port |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:3022` | Client-facing server address |
+| `DATA_DIR` | `./data` | Database and private application files |
+| `BACKUP_DIR` | `<DATA_DIR>/backups` | Backup destination |
+| `SESSION_DAYS` | `365` | Device session lifetime |
+| `WEB_PUSH_SUBJECT` | `PUBLIC_BASE_URL` | Web Push contact URL |
+
+For example, to use a separate local data directory:
+
+```bash
+DATA_DIR=./data-dev BACKUP_DIR=./data-dev/backups npm run dev
+```
+
+Use those same values when running pairing or backup commands. If you change the backend port during development, also update the API proxy in `vite.config.ts`.
+
+## Architecture
+
+```text
+Browser / PWA
+    |
+    v
+Fastify server -----------------> Codex app-server
+    |                                  |
+    v                                  v
+SQLite + local files              Project worktrees
+                                  + configured tools
+```
+
+| Component | Implementation |
+| :--- | :--- |
+| Frontend | React, TypeScript, Vite |
+| API and host services | Fastify, WebSockets |
+| Application storage | SQLite and local files |
+| Agent integration | Local Codex app-server process |
+| Task coordination | Stdio MCP server and companion skill |
+
+The browser is a client; repository access and agent execution happen on the host. Codex sessions inherit the host's configured MCP servers. See the [MCP entry point](src/mcp/index.ts) and [companion skill](skill/qahwa-tasks/SKILL.md).
+
+### Access model
+
+Task intake runs read-only. Ready tasks use an explicit `read-only` or `worktree-write` mode. Editing turns and terminal shells acquire exclusive access to overlapping project roots. Resource-capacity checks also limit concurrent work.
+
+File access is separate from approval to commit, push, deploy, publish, or close a task. The orchestrator has broad host execution access, so paired-device access should be restricted to trusted users.
+
+Database files, device keys, pairing links, uploads, and backups are private runtime state. Review and revoke devices from **Projects → Data & access**.
 
 ## Development
 
 ```bash
-npm install
-npm run dev
-npm run dev:web
+npm run typecheck  # Server and frontend type checks
+npm test           # Node test suite
+npm run build      # Production web and server compilation
 ```
 
-The backend defaults to `127.0.0.1:3022`. Create a local one-time pairing link with `npm run pair`.
+Use temporary data directories and synthetic fixtures when testing. Do not run tests against production databases or real agent sessions.
 
-## Production
+| Path | Responsibility |
+| :--- | :--- |
+| `src/domain/` | Shared types and domain helpers |
+| `src/server/` | API, persistence, agent sessions, and host services |
+| `src/web/` | React application and workspace components |
+| `src/mcp/` | Task-coordination MCP server |
+| `src/scripts/` | Pairing, backups, imports, and maintenance commands |
+| `test/` | Automated tests and browser fixtures |
+| `public/` | PWA assets, icons, and startup scripts |
 
-```bash
-npm run build
-pm2 start deploy/ecosystem.config.cjs
-```
+### Known validation failures
 
-The production service is designed for the existing Cloudflare Tunnel route at `tasks.qahwa.pro`. Device keys, SQLite data, backups, pairing grants, and exports are never committed.
+The last full test run during publication preparation reported **441 passes, 3 failures, and 1 skip**. The failures were in `session-resources.test.ts` (closure of a running task), `task-selection.test.ts` (queued snapshot capabilities), and `task-titles.test.ts` (an import extension error). Type checking and production compilation passed in that run. This is a recorded result, not a CI status; rerun the checks for your environment and changes.
 
-## Device pairing
+## Contributing
 
-The PWA requires the same one-time, server-identity-pinned pairing flow used by Qahwa Design. Create a link on the server:
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the development workflow and pull-request checklist. [Bug reports](https://github.com/burawi/qahwa-tasks/issues) should include reproduction steps, expected and actual behavior, and relevant environment details. Use synthetic examples and redact credentials and private conversations.
 
-```bash
-npm run pair:production
-```
+## License
 
-The link is written with mode `0600` under the configured data directory and expires after 15 minutes. Pairing links are server-created only; paired devices can be reviewed and revoked from Projects → Data & access.
-
-## Qahwa Design cutover
-
-The importer is dry-run-first and matches each canvas to a Qahwa Tasks project by its repository root:
-
-```bash
-npm run import:qahwa-design
-npm run import:qahwa-design -- --apply
-```
-
-The apply step creates a SQLite backup first, then preserves the current document, named versions, revision, and Codex thread. Stop the old Qahwa Design service before applying the cutover so two apps do not write to the imported thread.
-
-## Codex integration
-
-The local stdio MCP entry point is:
-
-```bash
-node /home/burawi/qahwa-tasks/dist/server/mcp/index.js
-```
-
-The companion skill is stored in `skill/qahwa-tasks/SKILL.md` and should be installed into the local Codex skills directory.
-
-App-server sessions inherit the user's configured MCP servers. The orchestrator has full execution access. Task intake always uses read-only execution; ready task sessions have a durable, explicit `read-only` or `worktree-write` access mode independent of intake readiness. Existing unclassified implementations default to exclusive editing. Read-only preparation can read source and return canvas content alongside another task in the same worktree. Editing turns and terminal shells acquire exclusive access across matching, nested, and symlinked project roots. Resource-capacity checks remain in effect. Its role instructions add current projects, task conversations, capacity, and standing directives. The hidden coordination envelope handles session starts, messages, interruptions, priorities, and directives; ordinary Codex tools handle other work. Existing conversations receive updated role instructions and execution settings on resume, preserving their history. Each turn snapshots its access grant before any Codex RPC. Read-only starts, resumes and turns enforce Codex's read-only sandbox with no permission escalation. The task chat's file-access control requests the next mode without starting work. An authorized conversational editing request queues a continuation; it waits for exclusive access before a later turn may edit. Requested modes, optimistic versions and queued messages survive restart and task restoration. Selecting an access mode grants no commit, deployment, publication or closure authority.
-
-## Task idle notifications
-
-Each task chat header has a “Notify when task is idle” switch. It is saved per task and defaults to off for existing and new tasks. Opted-in tasks send a native Qahwa Tasks browser/PWA notification when their active turn completes successfully and becomes idle. Approval/input waits, failed/interrupted turns and orchestrator turns do not send alerts. Automatic start, review and response-required alerts remain disabled.
-
-Enabling a task requests browser notification permission and registers that paired device for Web Push. Each device must grant permission separately; an enabled task offers “Enable on this device” if needed. Notifications use the app icon, arrive through the browser/installed PWA even when the task page is closed, and open the matching task when tapped. Browser and operating-system support and delivery restrictions apply. Revoked devices and expired subscriptions are excluded. Qahwa Notify is not used.
-
-VAPID keys are generated once on first setup and kept in the private application database/backups; only the public key is returned to paired devices. `WEB_PUSH_SUBJECT` can override the contact URL (default `PUBLIC_BASE_URL`). Durable turn receipts, Web Push topics and notification tags suppress duplicates. Delivery has a ten-second timeout per device; failures do not block task execution and are not retried automatically.
-
-## Reviewed commit approvals
-
-Coding outputs may carry a commit proposal containing the exact repository root, full base revision, commit message, reviewed repository-relative files, and release note. The Output card exposes all of that information before the user approves it.
-
-Approval is handled directly by the paired backend. It rechecks the repository revision and a stored snapshot of every reviewed file, builds the commit with an isolated temporary Git index, and atomically advances `HEAD` only from the reviewed base. Unrelated staged and dirty files are preserved and excluded; Git hooks are disabled for this backend action. The action never starts Codex, pushes, publishes, or deploys.
-
-After a successful commit, Qahwa Tasks creates or updates the project's single active `Publish/deploy changes` Todo, appends the commit and release note, and relates it to the approved source task. Publication and deployment still require separate explicit instructions.
+Licensed under the [MIT License](LICENSE).
