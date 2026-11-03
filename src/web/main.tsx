@@ -1,6 +1,7 @@
 import { Component, StrictMode, type ErrorInfo, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { BrandMark } from "./components/BrandMark";
 import "./styles.css";
 
 declare global {
@@ -20,7 +21,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 
   render() {
     if (!this.state.error) return this.props.children;
-    return <main className="login-page"><div className="setup-card" role="alert"><div className="coffee-mark">!</div><h1>Qahwa Tasks could not render</h1><p>A safe diagnostic was recorded. Reload the app to retry.</p><button className="primary" type="button" onClick={() => location.reload()}>Reload</button></div></main>;
+    return <main className="connection-screen"><div className="connection-card" role="alert"><BrandMark large /><h1>Qahwa Tasks could not render</h1><p>A safe diagnostic was recorded. Reload the app to retry.</p><button className="primary" type="button" onClick={() => location.reload()}>Reload</button></div></main>;
   }
 }
 

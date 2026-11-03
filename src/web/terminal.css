@@ -1,0 +1,33 @@
+.terminal-session { top: var(--terminal-top, 0px); bottom: auto; height: var(--terminal-height, 100dvh); }
+.terminal-session > .session-header { flex: none; }
+.terminal-session > .session-header > .terminal-actions { display: flex; flex: none; align-items: center; gap: 6px; }
+.terminal-session .terminal-session-status { flex: none; color: var(--muted); font-size: inherit; font-weight: 400; letter-spacing: 0; text-transform: capitalize; }
+.terminal-actions button { display: grid; place-items: center; flex: none; width: 44px; height: 44px; min-width: 44px; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); }
+.terminal-actions button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.terminal-actions svg { width: 20px; height: 20px; }
+.terminal-conversation { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; width: 100%; margin: 0; padding: 0; }
+.terminal-message { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--terminal-bg); }
+.terminal-screen { flex: 1; min-height: 0; min-width: 0; overflow: hidden; padding: 14px; }
+.terminal-screen .xterm { height: 100%; }
+.terminal-screen .xterm-viewport { overscroll-behavior: contain; }
+.terminal-output { flex: 1; min-height: 0; display: flex; position: relative; }
+.terminal-screen .xterm { touch-action: pinch-zoom; }
+.terminal-readback .terminal-text-action { display: grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 8px; color: var(--terminal-cursor); background: transparent; }
+.terminal-readback .terminal-text-action:hover { background: var(--surface-2); }
+.terminal-readback .terminal-text-action svg { width: 20px; height: 20px; }
+.terminal-readback { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--terminal-bg); color: var(--terminal-text); }
+.terminal-readback-hint { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 14px; color: var(--muted); font-size: 12px; }
+.terminal-select-text { flex: 1; min-height: 0; margin: 0; padding: 14px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: text; -webkit-user-select: text; touch-action: pan-x pan-y pinch-zoom; overscroll-behavior: contain; }
+.terminal-select-text::selection { background: var(--terminal-selection); color: var(--terminal-text); }
+.terminal-keys { display: flex; flex: none; gap: 6px; padding: 6px 12px max(6px, env(safe-area-inset-bottom)); width: 100%; max-width: 1200px; margin: 0 auto; overflow-x: auto; }
+.terminal-keys button { min-width: 44px; min-height: 44px; flex: none; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: var(--surface); color: var(--text); font-size: 12px; }
+.terminal-keys button[aria-pressed="true"] { background: var(--action); color: white; }
+.terminal-keys { touch-action: pan-x; }
+.terminal-keys button, .terminal-text-action { -webkit-tap-highlight-color: var(--accent-soft); }
+.terminal-keys button:enabled:is(:active, [data-pressed]), .terminal-text-action:enabled:is(:active, [data-pressed]), .terminal-session-action:enabled:active { background: var(--action); color: white; border-color: var(--action); }
+.terminal-keys button:focus-visible, .terminal-text-action:focus-visible, .terminal-session-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.terminal-keys svg { width: 16px; height: 16px; }
+.terminal-notice { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 8px; font-size: 12px; color: var(--muted); }
+@media (max-width: 600px) {
+  .terminal-session .codex-usage-indicator { min-width: 44px; width: 44px; flex-direction: column; gap: 3px; }
+}

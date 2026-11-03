@@ -39,7 +39,9 @@
     root.innerHTML = "";
     var main = document.createElement("main");
     main.setAttribute("role", "alert");
-    main.style.cssText = "box-sizing:border-box;max-width:32rem;margin:12vh auto;padding:24px;font:16px/1.5 system-ui,sans-serif;color:#24271f;background:#f5f3ed;border:1px solid #d7d4ca;border-radius:16px";
+    main.style.cssText = "box-sizing:border-box;max-width:32rem;margin:12vh auto;padding:24px;font:16px/1.5 system-ui,sans-serif;color:var(--text,CanvasText);background:var(--surface,Canvas);border:1px solid var(--line,GrayText);border-radius:16px";
+    // System colors still follow the saved theme if the stylesheet failed.
+    document.body.style.background = "var(--bg, Canvas)";
     var title = document.createElement("h1");
     title.textContent = "Qahwa Tasks could not start";
     var detail = document.createElement("p");
@@ -49,7 +51,7 @@
     var button = document.createElement("button");
     button.type = "button";
     button.textContent = "Reload cleanly";
-    button.style.cssText = "padding:12px 16px;border:0;border-radius:10px;background:#315c3a;color:white;font:inherit;font-weight:700";
+    button.style.cssText = "padding:12px 16px;border:0;border-radius:10px;background:#7138e8;color:white;font:inherit;font-weight:700";
     button.onclick = function () { sessionStorage.removeItem(attemptKey); recover(); };
     main.appendChild(title); main.appendChild(detail); main.appendChild(help); main.appendChild(button);
     root.appendChild(main);

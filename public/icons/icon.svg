@@ -1,7 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#b65f33"/>
-  <path d="M145 150h222a30 30 0 0 1 30 30v153a68 68 0 0 1-68 68H183a68 68 0 0 1-68-68V180a30 30 0 0 1 30-30Z" fill="#fff8eb"/>
-  <path d="M397 210h20a50 50 0 0 1 0 100h-20" fill="none" stroke="#fff8eb" stroke-width="28" stroke-linecap="round"/>
-  <path d="m179 275 43 42 106-112" fill="none" stroke="#b65f33" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M176 111c0-27 26-27 26-54M256 111c0-27 26-27 26-54M336 111c0-27 26-27 26-54" fill="none" stroke="#fff8eb" stroke-width="18" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="violet" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9657ff"/>
+      <stop offset="1" stop-color="#6025cf"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#violet)"/>
+  <path fill="#fff" fill-rule="evenodd" d="M246 106a128 128 0 1 0 69 236l49 49 41-41-49-49a128 128 0 0 0-110-195Zm0 56a72 72 0 1 1 0 144 72 72 0 0 1 0-144Z"/>
+  <path d="m276 264 48 48" fill="none" stroke="url(#violet)" stroke-width="14"/>
 </svg>

@@ -1,0 +1,11 @@
+button.codex-usage-indicator { --battery-color: var(--green); flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 44px; min-width: 70px; padding: 0 4px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer; }
+button.codex-usage-indicator:hover { background: var(--surface-2); }
+.codex-usage-indicator .codex-battery { position: relative; display: block; flex: none; box-sizing: border-box; width: 25px; height: 13px; padding: 2px; border: 1px solid currentColor; border-radius: 3px; color: var(--battery-color); }
+.codex-usage-indicator .codex-battery::after { content: ""; position: absolute; right: -3px; top: 3px; width: 2px; height: 5px; border-radius: 0 1px 1px 0; background: currentColor; }
+.codex-usage-indicator .codex-battery-fill { display: block; height: 100%; border-radius: 1px; color: inherit; background: currentColor; }
+.codex-usage-indicator .codex-battery-percent { color: var(--text); font-size: 12px; line-height: 1; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0; text-transform: none; }
+.codex-usage-indicator[data-level="low"] { --battery-color: var(--yellow); }
+.codex-usage-indicator[data-level="critical"] { --battery-color: var(--red); }
+.codex-usage-indicator[data-state="stale"] { --battery-color: var(--yellow); }
+.codex-usage-indicator[data-state="stale"] .codex-battery { border-style: dashed; }
+.codex-usage-indicator:is([data-state="loading"], [data-state="unavailable"], [data-state="unsupported"], [data-state="offline"], [data-state="error"]) { --battery-color: var(--muted); }

@@ -6,14 +6,17 @@ import { loadConfig } from "../server/config.js";
 import { AppDatabase } from "../server/database.js";
 import { TaskService } from "../server/task-service.js";
 import { addRelatedTask, removeRelatedTask, returnTaskToWork } from "./workflow.js";
+import { canvasCommentAnchor } from "../domain/canvas-comment.js";
+import { registerFollowupTools } from "./followup-tools.js";
 
 const config = loadConfig();
 const database = new AppDatabase(config);
 const tasks = new TaskService(database);
 const server = new McpServer({ name: "qahwa-tasks", version: "1.0.0" });
+registerFollowupTools(server, database, tasks);
 
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
-const compactTask = (task: ReturnType<TaskService["getTask"]>) => ({
+const compactTask = (task: ReturnType<TaskService["getTask"]>, includeResolvedHistory = false) => ({
   id: task.humanId,
   title: task.title,
   project: task.projectName,
@@ -26,8 +29,15 @@ const compactTask = (task: ReturnType<TaskService["getTask"]>) => ({
     id: comment.id,
     author: comment.author,
     text: comment.plainText,
+    resolvedAt: comment.resolvedAt,
+    canvas: canvasCommentAnchor(comment),
     replies: comment.replies.map((reply) => ({ id: reply.id, author: reply.author, text: reply.plainText })),
   })),
+  resolvedComments: includeResolvedHistory ? task.comments.filter(comment => comment.kind === "comment" && comment.resolvedAt).map(comment => ({
+    id: comment.id, author: comment.author, text: comment.plainText, resolvedAt: comment.resolvedAt,
+    canvas: canvasCommentAnchor(comment),
+    replies: comment.replies.map(reply => ({ id: reply.id, author: reply.author, text: reply.plainText })),
+  })) : undefined,
   outputs: task.outputs.map((output) => ({
     createdAt: output.createdAt, summary: output.summary, validation: output.validation, commit: output.commit,
     limitations: output.limitations, sessionId: output.sessionId, runId: output.runId, artifacts: output.artifacts,
@@ -69,7 +79,7 @@ server.registerTool("get_task", {
   description: "Load one task with its current description, structured outputs, unresolved comments, legacy latest handoff and project root. Resolved history is omitted by default to protect context.",
   inputSchema: { taskId: z.string(), includeResolvedHistory: z.boolean().optional() },
   annotations: { readOnlyHint: true },
-}, ({ taskId, includeResolvedHistory }) => text(compactTask(tasks.getTask(taskId, includeResolvedHistory ?? false))));
+}, ({ taskId, includeResolvedHistory }) => text(compactTask(tasks.getTask(taskId, includeResolvedHistory ?? false), includeResolvedHistory)));
 
 const taskSections = {
   goal: z.string().optional(),

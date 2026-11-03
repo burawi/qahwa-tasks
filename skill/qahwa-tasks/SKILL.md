@@ -7,14 +7,14 @@ description: Manage records in the user's private Qahwa Tasks system. Use when t
 
 Use the `qahwa-tasks` MCP tools as the authoritative record interface. Do not write its SQLite database directly.
 
-Qahwa Tasks owns execution itself. Every triggered task has one persistent built-in Codex session, and the single built-in orchestrator coordinates prioritization and capacity-aware starts. Do not launch a separate external worker for a Qahwa task or substitute another application’s session model.
+Every triggered task has a persistent built-in Codex session. The built-in orchestrator is a full Codex session with additional portfolio context, prioritization, and capacity-aware coordination. It can create and manage tasks through MCP and carry out other work the user requests directly. Its coordination action envelope supplements its normal tools; it does not define the limits of its capabilities.
 
 ## Read narrowly
 
 1. Follow the user's stated scope and project filter.
 2. Use `list_tasks` for the requested view or project.
 3. Load only the task records needed for the request. Omit resolved history unless current context is insufficient.
-4. Treat the returned `rootDirectory` as project metadata, not authority to begin implementation outside the task's built-in session.
+4. Use `rootDirectory` to locate the relevant project. A request to manage records does not by itself request implementation; when the user requests implementation directly, follow that scope and coordinate with any active task session sharing the worktree.
 
 ## Create and edit tasks
 
@@ -28,8 +28,15 @@ Qahwa Tasks owns execution itself. Every triggered task has one persistent built
 - Creating a task never starts it.
 - Task execution is triggered only by the user or by the built-in orchestrator after user authorization.
 - The built-in orchestrator decides safe parallelism from current computer capacity and can apply a user-authorized priority order.
-- Use the app's task chat for clarification, approvals, progress, design-canvas collaboration, and implementation follow-up.
-- Use the app's orchestrator chat for portfolio priorities, dependencies, capacity decisions, and material cross-task updates.
+- Task chats provide focused context for clarification, progress, design collaboration, and implementation follow-up. The orchestrator can also help directly and relay user-authorized instructions to task sessions; the user does not need to move between chats to obtain normal Codex capabilities.
+- Preserve authorization already given in the conversation and respect subsequent changes. Distinguish direct user requests from automated portfolio observations, which rely on the active standing directive for new work.
+
+## Conversational follow-ups
+
+- In an existing Qahwa conversation, understand requests such as "do this today at 9pm" from the normal message. Resolve the action from context, then use `schedule_followup` with that user message's `sourceMessageId` and an absolute local time. Do the work when the follow-up is delivered, not while saving it.
+- Use the submission date and captured device timezone for relative times; an explicit user timezone takes precedence. Ask only for genuinely missing or ambiguous information. Clear requests default to Run when available and need no extra confirmation.
+- Confirm the exact saved date, time and timezone only after the tool succeeds. Use `list_followups`, `edit_followup` and `cancel_followup` for subsequent requests, preserving saved versions. A retry must never create a duplicate or revive cancellation.
+- Examples, quoted text and deadlines do not by themselves authorize scheduling. Saving delivery metadata grants no implementation, deployment, publishing, commit or task closure permission. A due scheduled delivery must not be scheduled again automatically.
 
 ## Lifecycle
 

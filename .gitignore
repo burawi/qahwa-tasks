@@ -8,3 +8,15 @@ backups/
 *.sqlite-wal
 *.enc
 npm-debug.log*
+
+# Local task evidence, copied builds, and host-specific operational harnesses.
+/artifacts/
+/src/web/artifacts/
+/docs/
+/scripts/
+
+# Local credentials and environment overrides (keep the safe template).
+.env.*
+!.env.example
+*.pem
+*.key

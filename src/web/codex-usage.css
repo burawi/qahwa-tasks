@@ -1,0 +1,21 @@
+.codex-usage { min-width: 0; }
+.codex-usage > .codex-usage-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.codex-usage-heading > div { flex: 1 1 220px; display: grid; gap: 3px; }
+.codex-usage .codex-usage-heading button { flex: 0 0 auto; }
+.codex-usage > .codex-usage-content { display: grid; gap: 12px; min-width: 0; }
+.codex-usage p { margin: 0; font-size: 13px; }
+.codex-usage small { display: block; font-size: 12px; line-height: 1.5; }
+.codex-usage-limits, .codex-usage-bucket { display: grid; gap: 10px; min-width: 0; }
+.codex-usage-bucket > strong { font-size: 13px; overflow-wrap: anywhere; }
+.codex-usage-window { display: grid; gap: 4px; }
+.codex-usage-window-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 13px; }
+.codex-usage-window progress { appearance: none; width: 100%; height: 6px; border: 0; border-radius: 4px; overflow: hidden; background: var(--surface-2); accent-color: var(--accent); }
+.codex-usage-window progress::-webkit-progress-bar { background: var(--surface-2); }
+.codex-usage-window progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
+.codex-usage-window progress::-moz-progress-bar { background: var(--accent); border-radius: 4px; }
+.codex-usage-tokens { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.codex-usage-tokens dl { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0; }
+.codex-usage-tokens dl > div { display: grid; gap: 2px; }
+.codex-usage-tokens dt { color: var(--muted); font-size: 12px; }
+.codex-usage-tokens dd { margin: 0; font-weight: 600; font-size: 14px; font-variant-numeric: tabular-nums; }
+.codex-usage .codex-usage-stale { color: var(--muted); }

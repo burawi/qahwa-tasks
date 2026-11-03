@@ -1,0 +1,51 @@
+.chat-excerpt-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.chat-excerpt-action > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.chat-excerpt-action button { flex: none; min-height: 44px; padding: 8px 12px; border: 0; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 12px; cursor: pointer; }
+.composer-excerpt { display: flex; gap: 8px; align-items: flex-start; width: 100%; }
+.composer-excerpt > button { flex: none; display: grid; place-items: center; min-width: 44px; min-height: 44px; padding: 10px; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.composer-excerpt > button svg { width: 20px; height: 20px; }
+.composer-excerpt > button:hover { background: var(--accent-soft); }
+/* On short screens the composer itself scrolls. Keep its send row in flow
+   while an excerpt is present so it cannot cover the reply controls. */
+.chat-composer .composer-field:has(.composer-excerpt) > :is(.attach-button, .voice-record-button, .send-button),
+.chat-composer .composer-field:has(.composer-excerpt)::after { position: static; }
+.chat-composer .composer-field:has(.composer-excerpt)::after { pointer-events: none; }
+.chat-excerpt-preview {
+  min-width: 0;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 8px 12px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.chat-excerpt-preview strong { font-size: 11px; color: var(--muted); }
+.chat-excerpt-preview blockquote {
+  margin: 4px 0;
+  max-height: 108px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.chat-excerpt-preview button { min-height: 44px; padding: 4px 0; border: 0; border-radius: 4px; color: var(--accent); font-size: 11px; background: transparent; cursor: pointer; }
+.chat-excerpt-action button:focus-visible, .composer-excerpt button:focus-visible, .chat-excerpt-preview button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+}

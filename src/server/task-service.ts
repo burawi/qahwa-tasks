@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { assertDomain, DomainError } from "../domain/errors.js";
+import { TaskSchedules } from "./task-schedules.js";
+import { MessageSchedules } from "./message-schedules.js";
+import { requireDesignPage } from "./design-pages.js";
+import { MAX_PROJECT_LOGO_BYTES, PROJECT_LOGO_SIZE_ERROR } from "../domain/project-logo.js";
 import {
   documentFromSections,
   emptyDocument,
@@ -28,6 +32,9 @@ import {
 } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
 import { ReviewedCommitService, type StoredCommitProposal } from "./reviewed-commit.js";
+import { detectUploadedImage } from "./image-upload.js";
+import { fallbackTaskTitle } from "../domain/task-title.js";
+import { ATTACHMENT_LIMITS } from "./attachment-service.js";
 
 interface ProjectRow {
   id: string; name: string; prefix: string; root_directory: string; archived_at: string | null;
@@ -36,12 +43,20 @@ interface ProjectRow {
 }
 
 interface TaskRow {
+  session_kind: "codex" | "terminal";
+  pinned_at: string | null;
+  idle_notifications_enabled: number;
   id: string; human_id: string; project_id: string; project_name: string; project_prefix: string;
   project_logo_mime_type: ProjectLogo["mimeType"] | null; project_logo_size: number | null; project_logo_updated_at: string | null;
-  root_directory: string; title: string; description_json: string; status: TaskStatus; outcome: TaskOutcome;
+  root_directory: string; title: string; description_json: string; description_text: string; status: TaskStatus; outcome: TaskOutcome;
   rank: number; unresolved_comment_count: number; version: number; created_at: string; updated_at: string;
   smart_message: string; tone: TaskTone; session_state: SessionRunState; surface: SessionSurface;
   last_activity_at: string | null;
+  conversation_activity_at?: string;
+  latest_message_body?: string | null;
+  latest_message_role?: "user" | "assistant";
+  latest_message_at?: string;
+  conversation_unread_count?: number;
 }
 
 interface CommentRow {
@@ -60,14 +75,14 @@ interface OutputRow {
 
 export interface CreateTaskInput {
   projectId: string;
-  title: string;
+  title?: string;
   description?: RichTextDocument;
   sections?: { goal?: string; details?: string | string[]; doneWhen?: string[] };
   status?: "backlog" | "todo";
 }
 
 const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  backlog: ["todo"],
+  backlog: ["todo", "closed"],
   todo: ["in_progress", "closed"],
   in_progress: ["in_review", "closed"],
   in_review: ["in_progress", "closed"],
@@ -99,14 +114,31 @@ function projectFromRow(row: ProjectRow): Project {
 
 function taskFromRow(row: TaskRow): TaskSummary {
   return {
+    sessionKind: row.session_kind,
     id: row.id, humanId: row.human_id, projectId: row.project_id, projectName: row.project_name,
     projectPrefix: row.project_prefix, title: row.title, status: row.status, outcome: row.outcome,
     projectLogo: logoFromValues(row.project_id, row.project_logo_mime_type, row.project_logo_size, row.project_logo_updated_at),
     rank: row.rank, unresolvedCommentCount: Number(row.unresolved_comment_count), version: row.version,
     smartMessage: row.smart_message, tone: row.tone, sessionState: row.session_state, surface: row.surface,
     lastActivityAt: row.last_activity_at,
+    pinnedAt: row.pinned_at,
+    ...(row.conversation_activity_at === undefined ? {} : { conversation: {
+      ...(row.description_text ? { descriptionText: row.description_text } : {}),
+      activityAt: row.conversation_activity_at,
+      latestMessage: row.latest_message_body == null ? null : {
+        preview: messagePreview(row.latest_message_body), role: row.latest_message_role!, createdAt: row.latest_message_at!,
+      },
+      unreadCount: Number(row.conversation_unread_count),
+    } }),
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
+}
+
+function messagePreview(body: string): string {
+  return body.replace(/<qahwa-design>[\s\S]*?<\/qahwa-design>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]*>/g, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[`*_#~]/g, "")
+    .replace(/\s+/g, " ").trim().slice(0, 240) || "Attachment or canvas";
 }
 
 function logoFromValues(
@@ -119,7 +151,7 @@ function logoFromValues(
   return { mimeType, size, updatedAt, url: `/api/projects/${encodeURIComponent(projectId)}/logo?v=${encodeURIComponent(updatedAt)}` };
 }
 
-export const MAX_PROJECT_LOGO_BYTES = 256 * 1024;
+export { MAX_PROJECT_LOGO_BYTES } from "../domain/project-logo.js";
 export const MAX_ARTIFACT_PREVIEW_BYTES = 50 * 1024 * 1024;
 
 const ARTIFACT_MEDIA_TYPES: Record<string, { mediaType: string; kind: TaskArtifact["previewKind"] }> = {
@@ -131,6 +163,12 @@ const ARTIFACT_MEDIA_TYPES: Record<string, { mediaType: string; kind: TaskArtifa
   ".webp": { mediaType: "image/webp", kind: "image" },
   ".mp4": { mediaType: "video/mp4", kind: "video" },
   ".webm": { mediaType: "video/webm", kind: "video" },
+  ".mp3": { mediaType: "audio/mpeg", kind: "audio" },
+  ".wav": { mediaType: "audio/wav", kind: "audio" },
+  ".ogg": { mediaType: "audio/ogg", kind: "audio" },
+  ".m4a": { mediaType: "audio/mp4", kind: "audio" },
+  ".flac": { mediaType: "audio/flac", kind: "audio" },
+  ".opus": { mediaType: "audio/ogg", kind: "audio" },
   ".pdf": { mediaType: "application/pdf", kind: "pdf" },
 };
 
@@ -204,8 +242,8 @@ export class TaskService {
   uploadProjectLogo(id: string, bytes: Buffer, declaredMimeType: string, actor: Actor): Project {
     this.getProject(id);
     assertDomain(bytes.length > 0, "Logo file is empty", "empty_project_logo");
-    assertDomain(bytes.length <= MAX_PROJECT_LOGO_BYTES, "Logo must be 256 KB or smaller", "project_logo_too_large", 413);
-    const detected = this.detectLogo(bytes);
+    assertDomain(bytes.length <= MAX_PROJECT_LOGO_BYTES, PROJECT_LOGO_SIZE_ERROR, "project_logo_too_large", 413);
+    const detected = detectUploadedImage(bytes);
     assertDomain(detected !== null, "Logo must be a PNG, JPEG, or WebP image", "invalid_project_logo_type");
     assertDomain(declaredMimeType.toLowerCase() === detected.mimeType, "Logo content does not match its file type", "project_logo_type_mismatch");
     const directory = this.logoDirectory();
@@ -253,9 +291,11 @@ export class TaskService {
   }
 
   createTask(input: CreateTaskInput, actor: Actor): TaskDetail {
-    const title = input.title.trim();
-    assertDomain(title.length >= 1 && title.length <= 200, "Title must be 1–200 characters", "invalid_title");
     const description = validateDocument(input.description ?? this.descriptionFromSections(input.sections));
+    assertDomain(input.title === undefined || typeof input.title === "string", "Title must be text", "invalid_title");
+    const title = input.title?.trim() ?? fallbackTaskTitle(plainTextFromDocument(description));
+    assertDomain(title.length >= 1 && title.length <= 200, "Title must be 1–200 characters", "invalid_title");
+    const titleSource = input.title === undefined ? "fallback" : "manual";
     const status = input.status ?? "backlog";
     const create = this.database.db.transaction(() => {
       const project = this.database.db.prepare("SELECT * FROM projects WHERE id = ? AND archived_at IS NULL").get(input.projectId) as
@@ -267,9 +307,14 @@ export class TaskService {
       const rank = this.nextRank(status);
       const timestamp = now();
       this.database.db.prepare(`
-        INSERT INTO tasks (id, human_id, project_id, title, description_json, description_text, status, rank, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, humanId, input.projectId, title, JSON.stringify(description), plainTextFromDocument(description), status, rank, timestamp, timestamp);
+        INSERT INTO tasks (id, human_id, project_id, title, description_json, description_text, status, rank, created_at, updated_at, title_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, humanId, input.projectId, title, JSON.stringify(description), plainTextFromDocument(description), status, rank, timestamp, timestamp, titleSource);
+      if (titleSource === "fallback") {
+        this.database.db.prepare(`INSERT INTO task_title_jobs
+          (task_id, origin, source_version, source_title, description_json, created_at, updated_at) VALUES (?, 'new_task', 1, ?, ?, ?, ?)`)
+          .run(id, title, JSON.stringify(description), timestamp, timestamp);
+      }
       this.database.db.prepare(`
         INSERT INTO task_presence (task_id, message, tone, updated_at) VALUES (?, 'Not started', 'neutral', ?)
       `).run(id, timestamp);
@@ -282,7 +327,7 @@ export class TaskService {
     return this.getTask(create());
   }
 
-  listTasks(options: { tab?: "all" | "active" | "backlog" | "todo" | "open" | "closed"; projectId?: string } = {}): TaskSummary[] {
+  listTasks(options: { tab?: "all" | "active" | "backlog" | "todo" | "open" | "closed"; projectId?: string; order?: "conversation" } = {}): TaskSummary[] {
     const statuses = options.tab === "all"
       ? [...TASK_LIST_STATUSES]
       : !options.tab
@@ -296,11 +341,13 @@ export class TaskService {
       where += " AND t.project_id = ?";
       params.push(options.projectId);
     }
-    const order = options.tab === "all" || options.tab === "active"
+    // Conversation ordering is presentation only; queue callers retain status/rank order.
+    const conversation = options.order === "conversation";
+    const order = conversation ? "CASE WHEN t.pinned_at IS NOT NULL THEN 0 WHEN session_state = 'running' THEN 1 ELSE 2 END, conversation_activity_at DESC, t.created_at DESC, t.id ASC" : options.tab === "all" || options.tab === "active"
       ? `CASE t.status WHEN 'in_progress' THEN 0 WHEN 'in_review' THEN 1 WHEN 'todo' THEN 2 WHEN 'backlog' THEN 3 ELSE 4 END,
         t.rank, t.created_at`
       : "t.rank, t.created_at";
-    const rows = this.database.db.prepare(`${this.taskSelect()} WHERE ${where} ORDER BY ${order}`).all(...params) as TaskRow[];
+    const rows = this.database.db.prepare(`${this.taskSelect(conversation)} WHERE ${where} ORDER BY ${order}`).all(...params) as TaskRow[];
     return rows.map(taskFromRow);
   }
 
@@ -312,10 +359,28 @@ export class TaskService {
     const comments = this.commentsForTask(row.id, includeResolved);
     return {
       ...taskFromRow(row), rootDirectory: row.root_directory, description: parseDocument(row.description_json), comments,
+      idleNotificationsEnabled: Boolean(row.idle_notifications_enabled),
+      canEdit: this.taskContentEditable(row),
       outputs: this.outputsForTask(row.id),
       latestHandoff: [...comments].reverse().find((comment) => comment.kind === "handoff") ?? null,
       relatedTasks: this.relatedTasksForTask(row.id),
     };
+  }
+
+  setPinned(id: string, pinned: unknown): TaskDetail {
+    assertDomain(typeof pinned === "boolean", "Pinned must be true or false", "invalid_task_pin");
+    const task = this.getTask(id);
+    // Keep content versions, activity timestamps and queue rank untouched.
+    this.database.db.prepare("UPDATE tasks SET pinned_at = ? WHERE id = ?")
+      .run(pinned ? task.pinnedAt ?? now() : null, task.id);
+    return this.getTask(task.id);
+  }
+
+  setIdleNotifications(id: string, enabled: unknown): TaskDetail {
+    assertDomain(typeof enabled === "boolean", "Idle notifications must be enabled or disabled", "invalid_idle_notifications");
+    const task = this.getTask(id);
+    this.database.db.prepare("UPDATE tasks SET idle_notifications_enabled = ? WHERE id = ?").run(Number(enabled), task.id);
+    return this.getTask(task.id);
   }
 
   addRelatedTask(id: string, relatedId: string, actor: Actor): TaskDetail {
@@ -349,55 +414,160 @@ export class TaskService {
     return this.getTask(task.id);
   }
 
+  private taskContentEditable(task: Pick<TaskRow, "id" | "status" | "session_kind">): boolean {
+    return task.session_kind === "codex" && ["backlog", "todo"].includes(task.status)
+      && !this.database.db.prepare(`SELECT 1 FROM agent_sessions WHERE owner_type = 'task' AND owner_id = ?
+        AND (run_state != 'not_started' OR thread_id IS NOT NULL OR active_turn_id IS NOT NULL OR starting_message_id IS NOT NULL)`).get(task.id)
+      && !this.database.db.prepare(`SELECT 1 FROM session_events WHERE owner_type = 'task' AND owner_id = ?
+        AND event_type = 'turn.started' LIMIT 1`).get(task.id);
+  }
+
   updateTask(id: string, input: { title?: string; description?: RichTextDocument; expectedVersion: number }, actor: Actor): TaskDetail {
-    const task = this.getTask(id);
-    assertDomain(task.version === input.expectedVersion, "Task changed since it was opened", "version_conflict", 409);
-    const title = input.title?.trim() ?? task.title;
-    const description = validateDocument(input.description ?? task.description);
-    assertDomain(title.length >= 1 && title.length <= 200, "Title must be 1–200 characters", "invalid_title");
-    const version = task.version + 1;
-    this.database.db.prepare(`
-      UPDATE tasks SET title = ?, description_json = ?, description_text = ?, version = ?, updated_at = ? WHERE id = ?
-    `).run(title, JSON.stringify(description), plainTextFromDocument(description), version, now(), task.id);
-    this.saveVersion(task.id, version, title, description, actor);
-    this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "task.edited", details: { version } });
-    return this.getTask(task.id);
+    // Share the write lock with startup, cancellation, title generation and other editors.
+    return this.database.db.transaction(() => {
+      const task = this.getTask(id);
+      if (actor === "user") assertDomain(task.canEdit,
+        "This task has already started or closed. Your draft is kept.", "task_started", 409);
+      assertDomain(Number.isSafeInteger(input?.expectedVersion) && input.expectedVersion > 0,
+        "A saved task version is required", "invalid_version");
+      assertDomain(task.version === input.expectedVersion, "Task changed since it was opened. Your draft is kept.", "version_conflict", 409);
+      assertDomain(input.title === undefined || typeof input.title === "string", "Title must be text", "invalid_title");
+      const title = input.title?.trim() ?? task.title;
+      const description = validateDocument(input.description ?? task.description);
+      assertDomain(title.length >= 1 && title.length <= 200, "Title must be 1–200 characters", "invalid_title");
+      const version = task.version + 1;
+      this.database.db.prepare(`
+        UPDATE tasks SET title = ?, description_json = ?, description_text = ?, version = ?, updated_at = ?,
+          title_source = CASE WHEN ? THEN 'manual' ELSE title_source END WHERE id = ?
+      `).run(title, JSON.stringify(description), plainTextFromDocument(description), version, now(), input.title !== undefined ? 1 : 0, task.id);
+      this.saveVersion(task.id, version, title, description, actor);
+      this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "task.edited", details: { version } });
+      return this.getTask(task.id);
+    }).immediate();
   }
 
   transition(
     id: string,
-    input: { to: TaskStatus; outcome?: Exclude<TaskOutcome, null>; explicitUserInstruction?: string },
+    input: { to: TaskStatus; outcome?: Exclude<TaskOutcome, null>; explicitUserInstruction?: string; onlyIfUnstarted?: boolean },
     actor: Actor,
   ): TaskDetail {
-    const task = this.getTask(id);
-    assertDomain(TRANSITIONS[task.status].includes(input.to), `Cannot move ${task.status} to ${input.to}`, "invalid_transition", 409);
-    assertDomain(
-      !(task.status === "in_review" && input.to === "in_progress") || actor === "codex",
-      "Only Codex can return an in-review task to work",
-      "invalid_transition",
-      409,
-    );
-    const outcome = input.to === "closed" ? input.outcome : null;
-    if (input.to === "closed") {
-      assertDomain(outcome === "completed" || outcome === "cancelled", "Closed tasks need an outcome", "outcome_required");
-      if (outcome === "completed") assertDomain(task.status === "in_review", "Only reviewed tasks can be completed", "review_required", 409);
-      if (actor === "codex") {
-        assertDomain(
-          Boolean(input.explicitUserInstruction?.trim()),
-          "Codex may close a task only with an explicit user instruction",
-          "explicit_instruction_required",
-          403,
-        );
+    // Serialize eligibility, closure and queue removal with dispatch reservation,
+    // including callers using another database connection (such as MCP).
+    return this.database.db.transaction(() => {
+      const task = this.getTask(id);
+      assertDomain(input.onlyIfUnstarted === undefined || typeof input.onlyIfUnstarted === "boolean",
+        "onlyIfUnstarted must be true or false", "invalid_cancellation");
+      if (input.onlyIfUnstarted) {
+        assertDomain(input.to === "closed" && input.outcome === "cancelled", "Unstarted guard requires cancellation", "invalid_cancellation");
+        assertDomain(task.status === "backlog" || task.status === "todo",
+          "This task has already started or closed. Refresh before cancelling it.", "task_started", 409);
       }
-    }
-    const timestamp = now();
-    this.database.db.prepare("UPDATE tasks SET status = ?, outcome = ?, rank = ?, updated_at = ? WHERE id = ?")
-      .run(input.to, outcome, this.nextRank(input.to), timestamp, task.id);
-    this.activity({
-      taskId: task.id, projectId: task.projectId, actor, eventType: "task.status_changed",
-      details: { from: task.status, to: input.to, outcome, explicitUserInstruction: input.explicitUserInstruction },
-    });
-    return this.getTask(task.id);
+      assertDomain(TRANSITIONS[task.status].includes(input.to), `Cannot move ${task.status} to ${input.to}`, "invalid_transition", 409);
+      assertDomain(
+        !(task.status === "in_review" && input.to === "in_progress") || actor === "codex",
+        "Only Codex can return an in-review task to work",
+        "invalid_transition",
+        409,
+      );
+      const outcome = input.to === "closed" ? input.outcome : null;
+      if (input.to === "closed") {
+        assertDomain(!this.database.db.prepare("SELECT 1 FROM terminal_sessions WHERE task_id = ? AND state = 'running'").get(task.id),
+          "Exit the running shell before closing this terminal", "terminal_running", 409);
+        assertDomain(outcome === "completed" || outcome === "cancelled", "Closed tasks need an outcome", "outcome_required");
+        assertDomain(!["running", "waiting"].includes(task.sessionState)
+          && !this.database.db.prepare("SELECT 1 FROM agent_sessions WHERE owner_type = 'task' AND owner_id = ? AND (starting_message_id IS NOT NULL OR active_turn_id IS NOT NULL)").get(task.id),
+          "Pause this task before cancelling or completing it.", "task_running", 409);
+        if (input.onlyIfUnstarted) {
+          assertDomain(!this.database.db.prepare(`SELECT 1 FROM session_events WHERE owner_type = 'task' AND owner_id = ? AND event_type = 'turn.started'
+            AND id > COALESCE((SELECT MAX(id) FROM session_events WHERE owner_type='task' AND owner_id=? AND event_type='session.restored'),0) LIMIT 1`).get(task.id, task.id),
+            "This task has already started. Refresh before cancelling it.", "task_started", 409);
+        }
+        if (actor === "codex") {
+          assertDomain(
+            Boolean(input.explicitUserInstruction?.trim()),
+            "Codex may close a task only with an explicit user instruction",
+            "explicit_instruction_required",
+            403,
+          );
+        }
+      }
+      const timestamp = now();
+      this.database.db.prepare("UPDATE tasks SET status = ?, outcome = ?, rank = ?, updated_at = ? WHERE id = ?")
+        .run(input.to, outcome, this.nextRank(input.to), timestamp, task.id);
+      if (input.to === "closed") new MessageSchedules(this.database, this).cancelTask(task.id, "Conversation closed; scheduled delivery cancelled");
+      if (input.to === "closed") {
+        // Pending files become ordinary history with the normal retention period.
+        this.database.db.prepare(`UPDATE attachment_uploads SET expires_at = MAX(expires_at, ?)
+          WHERE message_id IN (SELECT m.id FROM chat_messages m JOIN pending_messages p ON p.message_id = m.id
+            WHERE m.owner_type = 'task' AND m.owner_id = ?)`)
+          .run(new Date(Date.now() + ATTACHMENT_LIMITS.completedMs).toISOString(), task.id);
+        this.database.db.prepare(`DELETE FROM pending_messages WHERE message_id IN
+          (SELECT id FROM chat_messages WHERE owner_type = 'task' AND owner_id = ?)`).run(task.id);
+        this.database.db.prepare("DELETE FROM scheduler_queue WHERE task_id = ?").run(task.id);
+        const schedules = new TaskSchedules(this.database, this);
+        if (["pending", "reserved"].includes(schedules.get(task.id)?.state ?? "")) schedules.setState(task.id, "cancelled", "Task was closed");
+        this.database.db.prepare("UPDATE task_presence SET message = ?, tone = ?, updated_at = ? WHERE task_id = ?")
+          .run(outcome === "completed" ? "Completed" : "Cancelled", outcome === "completed" ? "green" : "neutral", timestamp, task.id);
+      }
+      this.activity({
+        taskId: task.id, projectId: task.projectId, actor, eventType: "task.status_changed",
+        details: { from: task.status, to: input.to, outcome, explicitUserInstruction: input.explicitUserInstruction },
+      });
+      return this.getTask(task.id);
+    }).immediate();
+  }
+
+  restoreCodex(id: string, expectedVersion: unknown): TaskDetail {
+    return this.database.db.transaction(() => {
+      const task = this.getTask(id);
+      assertDomain((task.sessionKind ?? "codex") === "codex", "Use terminal session controls to restore a terminal", "invalid_session_kind", 409);
+      assertDomain(typeof expectedVersion === "number" && Number.isSafeInteger(expectedVersion) && expectedVersion > 0,
+        "A saved task version is required", "invalid_version");
+      assertDomain(task.version === expectedVersion && task.status === "closed",
+        "This session changed. Refresh before restoring it.", "restore_conflict", 409);
+      assertDomain(!this.database.db.prepare(`SELECT 1 FROM agent_sessions WHERE owner_type = 'task' AND owner_id = ?
+        AND (run_state IN ('running','waiting') OR starting_message_id IS NOT NULL)`).get(task.id),
+        "Interrupt the active session before restoring it.", "task_running", 409);
+      const timestamp = now();
+      // Increment the version so a delayed retry cannot reopen a later closure.
+      new MessageSchedules(this.database, this).cancelTask(task.id, "Session restored; scheduled delivery cancelled", true);
+      this.database.db.prepare(`UPDATE tasks SET status = 'backlog', outcome = NULL, version = version + 1,
+        rank = ?, updated_at = ? WHERE id = ?`).run(this.nextRank("backlog"), timestamp, task.id);
+      this.saveVersion(task.id, task.version + 1, task.title, task.description, "user");
+      this.database.db.prepare(`UPDATE attachment_uploads SET expires_at = MAX(expires_at, ?)
+        WHERE message_id IN (SELECT m.id FROM chat_messages m JOIN pending_messages p ON p.message_id = m.id
+          WHERE m.owner_type = 'task' AND m.owner_id = ?)`).run(new Date(Date.now() + ATTACHMENT_LIMITS.completedMs).toISOString(), task.id);
+      this.database.db.prepare(`DELETE FROM pending_messages WHERE message_id IN
+        (SELECT id FROM chat_messages WHERE owner_type = 'task' AND owner_id = ?)`).run(task.id);
+      this.database.db.prepare("DELETE FROM scheduler_queue WHERE task_id = ?").run(task.id);
+      const schedules = new TaskSchedules(this.database, this);
+      if (["pending", "reserved"].includes(schedules.get(task.id)?.state ?? "")) schedules.setState(task.id, "cancelled", "Session restored; automatic startup disabled");
+      this.database.db.prepare(`UPDATE pending_requests SET status = 'expired', resolved_at = ?
+        WHERE owner_type = 'task' AND owner_id = ? AND status = 'pending'`).run(timestamp, task.id);
+      this.database.db.prepare(`UPDATE agent_sessions SET active_turn_id = NULL, starting_message_id = NULL,
+        run_state = CASE WHEN thread_id IS NULL THEN 'not_started' ELSE 'idle' END,
+        generation = generation + 1, last_error = NULL, updated_at = ? WHERE owner_type = 'task' AND owner_id = ?`).run(timestamp, task.id);
+      this.database.db.prepare(`INSERT INTO session_events(owner_type,owner_id,event_type,created_at)
+        VALUES ('task',?,'session.restored',?)`).run(task.id, timestamp);
+      this.database.db.prepare(`INSERT INTO task_presence(task_id,message,tone,reason,updated_at)
+        VALUES (?,'Restored to Backlog','neutral','Waiting for your next request',?)
+        ON CONFLICT(task_id) DO UPDATE SET message=excluded.message,tone=excluded.tone,reason=excluded.reason,updated_at=excluded.updated_at`).run(task.id, timestamp);
+      this.activity({ taskId: task.id, projectId: task.projectId, actor: "user", eventType: "task.restored",
+        details: { from: "closed", outcome: task.outcome, to: "backlog", previousVersion: task.version } });
+      return this.getTask(task.id);
+    }).immediate();
+  }
+
+  restoreTerminal(id: string): TaskDetail {
+    return this.database.db.transaction(() => {
+      const task = this.getTask(id);
+      assertDomain(task.sessionKind === "terminal" && task.status === "closed",
+        "Only closed terminal sessions can be restored", "terminal_not_closed", 409);
+      this.database.db.prepare("UPDATE tasks SET status = 'backlog', outcome = NULL, rank = ?, updated_at = ? WHERE id = ?")
+        .run(this.nextRank("backlog"), now(), task.id);
+      this.activity({ taskId: task.id, projectId: task.projectId, actor: "user", eventType: "terminal.restored" });
+      return this.getTask(task.id);
+    }).immediate();
   }
 
   reorder(id: string, input: { beforeId?: string | null; afterId?: string | null }, actor: Actor): TaskDetail {
@@ -439,6 +609,8 @@ export class TaskService {
 
   deleteBacklogTask(id: string, actor: Actor): void {
     const task = this.getTask(id);
+    assertDomain(!this.database.db.prepare("SELECT 1 FROM terminal_sessions WHERE task_id = ? AND state = 'running'").get(task.id),
+      "Exit the running shell before deleting this terminal", "terminal_running", 409);
     assertDomain(task.status === "backlog", "Only Backlog tasks can be deleted", "task_not_deletable", 409);
     this.activity({ taskId: task.id, projectId: task.projectId, actor, eventType: "task.deleted", details: { humanId: task.humanId } });
     this.database.db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
@@ -450,6 +622,8 @@ export class TaskService {
     actor: Actor,
   ): TaskComment {
     const task = this.getTask(taskId);
+    const anchor = input.metadata?.canvas as { pageId?: unknown } | undefined;
+    if (anchor && anchor.pageId !== undefined) requireDesignPage(this.database.db, task.id, anchor.pageId);
     const body = validateDocument(input.body);
     const plainText = plainTextFromDocument(body);
     assertDomain(plainText.length > 0, "Comment cannot be empty", "empty_comment");
@@ -608,19 +782,29 @@ export class TaskService {
     return (row.maximum ?? 0) + 1024;
   }
 
-  private taskSelect(): string {
+  private taskSelect(conversation = false): string {
     return `SELECT t.*, p.name AS project_name, p.prefix AS project_prefix, p.root_directory,
       p.logo_mime_type AS project_logo_mime_type, p.logo_size AS project_logo_size,
       p.logo_updated_at AS project_logo_updated_at,
       COALESCE(tp.message, CASE WHEN t.status = 'closed' THEN 'Completed' ELSE 'Not started' END) AS smart_message,
       COALESCE(tp.tone, CASE WHEN t.status = 'closed' AND t.outcome = 'completed' THEN 'green' ELSE 'neutral' END) AS tone,
-      COALESCE(s.run_state, 'not_started') AS session_state,
-      COALESCE(s.surface, 'undecided') AS surface,
-      s.updated_at AS last_activity_at,
+      CASE WHEN t.session_kind = 'terminal' THEN CASE ts.state WHEN 'running' THEN 'running' WHEN 'exited' THEN 'idle' ELSE COALESCE(ts.state, 'failed') END ELSE COALESCE(s.run_state, 'not_started') END AS session_state,
+      CASE WHEN t.session_kind = 'terminal' THEN 'chat' ELSE COALESCE(s.surface, 'undecided') END AS surface,
+      COALESCE(ts.updated_at, s.updated_at) AS last_activity_at,
+      ${conversation ? `COALESCE(ts.updated_at, latest.created_at, t.created_at) AS conversation_activity_at,
+      latest.body AS latest_message_body, latest.role AS latest_message_role, latest.created_at AS latest_message_at,
+      (SELECT COUNT(*) FROM chat_messages m LEFT JOIN chat_message_reads r ON r.message_id = m.id
+        WHERE m.owner_type = 'task' AND m.owner_id = t.id AND m.role = 'assistant'
+          AND COALESCE(json_extract(m.metadata_json, '$.queueScheduling'), 0) != 1 AND r.message_id IS NULL) AS conversation_unread_count,` : ""}
       (SELECT COUNT(*) FROM comments c WHERE c.task_id = t.id AND c.kind = 'comment' AND c.parent_id IS NULL AND c.resolved_at IS NULL) AS unresolved_comment_count
       FROM tasks t JOIN projects p ON p.id = t.project_id
       LEFT JOIN task_presence tp ON tp.task_id = t.id
-      LEFT JOIN agent_sessions s ON s.owner_type = 'task' AND s.owner_id = t.id`;
+      LEFT JOIN agent_sessions s ON s.owner_type = 'task' AND s.owner_id = t.id
+      LEFT JOIN terminal_sessions ts ON ts.task_id = t.id
+      ${conversation ? `LEFT JOIN chat_messages latest ON latest.id = (
+        SELECT m.id FROM chat_messages m WHERE m.owner_type = 'task' AND m.owner_id = t.id
+          AND m.role IN ('user', 'assistant') AND COALESCE(json_extract(m.metadata_json, '$.queueScheduling'), 0) != 1
+        ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1)` : ""}`;
   }
 
   private logoDirectory(): string {
@@ -643,19 +827,6 @@ export class TaskService {
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-  }
-
-  private detectLogo(bytes: Buffer): { mimeType: ProjectLogo["mimeType"]; extension: string } | null {
-    if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
-      return { mimeType: "image/png", extension: "png" };
-    }
-    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-      return { mimeType: "image/jpeg", extension: "jpg" };
-    }
-    if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
-      return { mimeType: "image/webp", extension: "webp" };
-    }
-    return null;
   }
 
   private commentsForTask(taskId: string, includeResolved: boolean): TaskComment[] {

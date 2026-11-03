@@ -19,6 +19,14 @@ test("project logo UI uses a deterministic prefix fallback", () => {
 test("project logo UI rejects unsupported, empty, and oversized files", () => {
   assert.equal(projectLogoValidationError({ type: "image/gif", size: 100 }), "Choose a PNG, JPEG, or WebP image");
   assert.equal(projectLogoValidationError({ type: "image/png", size: 0 }), "Logo file is empty");
-  assert.equal(projectLogoValidationError({ type: "image/webp", size: 256 * 1024 + 1 }), "Logo must be 256 KB or smaller");
+  assert.equal(projectLogoValidationError({ type: "image/webp", size: 2 * 1024 * 1024 + 1 }), "Logo must be 2 MB or smaller");
   assert.equal(projectLogoValidationError({ type: "image/jpeg", size: 1024 }), null);
+});
+
+test("project logo UI accepts files above 256 KB through exactly 2 MiB", () => {
+  for (const type of ["image/png", "image/jpeg", "image/webp"]) {
+    for (const size of [256 * 1024 + 1, 512 * 1024 + 1, 2 * 1024 * 1024]) {
+      assert.equal(projectLogoValidationError({ type, size }), null);
+    }
+  }
 });

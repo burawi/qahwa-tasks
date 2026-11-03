@@ -3,7 +3,7 @@ import type { FastifyRequest } from "fastify";
 import { DomainError } from "../domain/errors.js";
 import type { AppDatabase } from "./database.js";
 
-export interface SessionUser { actor: "user" }
+export interface SessionUser { actor: "user"; deviceId: string }
 
 const hashToken = (token: string): string => createHash("sha256").update(token).digest("hex");
 
@@ -39,6 +39,6 @@ export class AuthService {
     }
     this.database.db.prepare("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?")
       .run(new Date().toISOString(), hashToken(token));
-    return { actor: "user" };
+    return { actor: "user", deviceId: row.device_id };
   }
 }

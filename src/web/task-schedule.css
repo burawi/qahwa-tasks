@@ -1,0 +1,15 @@
+.task-schedule-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line); flex-shrink:0; font-size:13px; }
+.task-schedule-bar > div { display:grid; gap:4px; min-width:0; overflow-wrap:anywhere; }
+.task-schedule-bar small { opacity:.7; }
+.task-schedule-bar button { flex-shrink:0; min-height:44px; }
+.schedule-dialog { max-height:calc(100dvh - 24px); overflow:auto; }
+.schedule-dialog label { display:grid; gap:6px; }
+.schedule-dialog input, .schedule-dialog select, .schedule-dialog textarea { box-sizing:border-box; width:100%; min-width:0; min-height:44px; padding:10px; font:inherit; color:inherit; background:var(--surface); border:1px solid var(--line); border-radius:10px; }
+.schedule-dialog p { margin:0; line-height:1.5; overflow-wrap:anywhere; }
+.schedule-dialog .button-row { flex-wrap:wrap; }
+.schedule-timezone { font-size:12px; opacity:.8; }
+@media(max-width:420px) { .task-schedule-bar { padding:10px 12px; flex-wrap:wrap; } }
+
+.schedule-dialog textarea { resize:vertical; }
+.followup-schedule-status { display:grid; gap:4px; margin:8px 0; font-size:12px; overflow-wrap:anywhere; }
+.followup-schedule-status small { opacity:.75; }

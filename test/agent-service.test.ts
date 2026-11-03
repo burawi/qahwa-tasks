@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
+import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
+import { readFileSync } from "node:fs";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
   const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
@@ -77,6 +78,20 @@ test("implementation handoff preserves clarified scope and blocks unrelated work
   assert.match(handoff, /Do not substitute adjacent work/);
 });
 
+test("attachment turns expose every temporary path and provide images as native image inputs", () => {
+  const attachments = [
+    { filename: "notes.txt", mediaType: "text/plain", size: 12, path: "/tmp/qahwa-tasks-attachments/a/data" },
+    { filename: "screen.png", mediaType: "image/png", size: 34, path: "/tmp/qahwa-tasks-attachments/b/data" },
+  ];
+  const prompt = appendAttachmentPaths("Review these", attachments);
+  assert.match(prompt, /notes\.txt.*\/tmp\/qahwa-tasks-attachments\/a\/data/);
+  assert.match(prompt, /screen\.png.*\/tmp\/qahwa-tasks-attachments\/b\/data/);
+  assert.deepEqual(buildAttachmentTurnInput(prompt, attachments), [
+    { type: "text", text: prompt },
+    { type: "localImage", path: "/tmp/qahwa-tasks-attachments/b/data" },
+  ]);
+});
+
 test("orchestrator envelope can manage and use a standing directive", () => {
   const response = parseAgentEnvelope(`<!-- qahwa-actions:[{"type":"directive","enabled":true,"instruction":"Continue prioritized work when capacity is safe","authorization":"continue the work"},{"type":"start","taskId":"was-0001","authorization":"continue the work","directiveId":"directive-1"}] -->`);
   assert.deepEqual(response.actions, [
@@ -104,4 +119,13 @@ test("session events become useful Orca-style work activities without protocol n
   ]);
   assert.equal(activities[1]?.detail, "npm test");
   assert.equal(activities[1]?.context, "1 test failed");
+});
+
+test("Qahwa applies selected models and efforts while preserving execution policy", () => {
+  const source = readFileSync(new URL("../src/server/agent-service.ts", import.meta.url), "utf8");
+  assert.match(source, /model: modelSettings.model/);
+  assert.match(source, /effort: modelSettings.effort/);
+  assert.match(source, /approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access"/);
+  assert.doesNotMatch(source, /approvalPolicy: "on-request"/);
+  assert.doesNotMatch(source, /guardian_subagent/);
 });

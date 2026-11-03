@@ -13,7 +13,7 @@ module.exports = {
         BACKUP_DIR: "/home/burawi/.local/share/qahwa-tasks/backups",
         SESSION_DAYS: "365"
       },
-      max_memory_restart: "350M",
+      max_memory_restart: "600M",
       exp_backoff_restart_delay: 100,
       time: true
     }

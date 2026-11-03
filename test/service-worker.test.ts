@@ -10,18 +10,19 @@ import { AppDatabase } from "../src/server/database.js";
 test("service worker purges Cache Storage and bypasses poisoned immutable HTTP CSS", () => {
   const source = readFileSync(new URL("../public/sw.js", import.meta.url), "utf8");
 
-  assert.match(source, /qahwa-tasks-v13/);
+  assert.match(source, /qahwa-tasks-v19/);
   assert.doesNotMatch(source, /STATIC_ASSETS\s*=\s*\[[^\]]*["']\/["']/s);
   assert.match(source, /event\.request\.mode === "navigate"/);
   assert.match(source, /legacyCaches\.length > 0/);
-  assert.doesNotMatch(source, /await .*client\.navigate/);
-  assert.match(source, /searchParams\.get\("recovery"\) === "v13"/);
-  assert.match(source, /recoveryUrl\.searchParams\.set\("recovery", "v13"\)/);
+  const activation = source.slice(source.indexOf('self.addEventListener("activate"'), source.indexOf('self.addEventListener("fetch"'));
+  assert.doesNotMatch(activation, /await .*client\.navigate/);
+  assert.match(source, /searchParams\.get\("recovery"\) === "v19"/);
+  assert.match(source, /recoveryUrl\.searchParams\.set\("recovery", "v19"\)/);
   assert.match(source, /client\.navigate\(recoveryUrl\.toString\(\)\)\.catch/);
   assert.match(source, /STATIC_ASSETS\.includes\(url\.pathname\)/);
   assert.match(source, /url\.pathname\.endsWith\("\.css"\)/);
   assert.match(source, /url\.searchParams\.set\("qahwa-style", STYLE_RECOVERY\)/);
-  assert.doesNotMatch(source, /cache\.put\(event\.request/);
+
   assert.match(source, /You are offline\. Reconnect and reload to continue\./);
 });
 

@@ -129,8 +129,9 @@ export class PairingService {
             result: {
               status: response.statusCode,
               contentType,
+              contentRange: response.headers["content-range"],
               body,
-              bodyBase64: isJson ? undefined : response.rawPayload.toString("base64"),
+              bodyBase64: isJson && !response.headers["content-disposition"] ? undefined : response.rawPayload.toString("base64"),
             },
           });
           return;

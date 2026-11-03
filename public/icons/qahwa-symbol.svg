@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="96 84 328 328">
+  <defs><mask id="cut"><rect x="96" y="84" width="328" height="328" fill="white"/><path d="m276 264 48 48" fill="none" stroke="black" stroke-width="14"/></mask></defs>
+  <path mask="url(#cut)" fill="currentColor" fill-rule="evenodd" d="M246 106a128 128 0 1 0 69 236l49 49 41-41-49-49a128 128 0 0 0-110-195Zm0 56a72 72 0 1 1 0 144 72 72 0 0 1 0-144Z"/>
+</svg>

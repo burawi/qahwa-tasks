@@ -51,13 +51,14 @@ try {
           description: documentFromPlainText(`Continue the imported ${entry.design.name} design canvas. Imported from Qahwa Design revision ${entry.design.revision}.`),
         }, "system");
         const document = JSON.parse(entry.design.document) as DesignDocument;
-        target.db.prepare("INSERT INTO design_documents (task_id, document_json, revision, updated_at) VALUES (?, ?, ?, ?)")
-          .run(task.id, JSON.stringify(document), entry.design.revision, entry.design.updated_at);
+        target.db.prepare("INSERT INTO design_pages (id, task_id, name, document_json, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(`canvas:${task.id}`, task.id, document.artboard.name || entry.design.name, JSON.stringify(document), entry.design.revision, entry.design.created_at, entry.design.updated_at);
+        target.db.prepare("INSERT INTO design_page_selection (task_id, page_id) VALUES (?, ?)").run(task.id, `canvas:${task.id}`);
         const versions = source.prepare("SELECT * FROM versions WHERE project_id = ? ORDER BY created_at").all(entry.design.id) as Array<{
           id: string; name: string; document: string; revision: number; created_at: string;
         }>;
-        const insertVersion = target.db.prepare("INSERT INTO design_versions (id, task_id, name, document_json, revision, created_at) VALUES (?, ?, ?, ?, ?, ?)");
-        for (const version of versions) insertVersion.run(version.id || randomUUID(), task.id, version.name, version.document, version.revision, version.created_at);
+        const insertVersion = target.db.prepare("INSERT INTO design_pages (id, task_id, name, document_json, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        for (const version of versions) insertVersion.run(version.id || randomUUID(), task.id, version.name, version.document, version.revision, version.created_at, version.created_at);
         const timestamp = new Date().toISOString();
         target.db.prepare(`
           INSERT INTO agent_sessions (id, owner_type, owner_id, thread_id, surface, run_state, created_at, updated_at)

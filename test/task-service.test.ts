@@ -7,6 +7,7 @@ import { documentFromPlainText } from "../src/domain/types.js";
 import type { Config } from "../src/server/config.js";
 import { AppDatabase } from "../src/server/database.js";
 import { TaskService } from "../src/server/task-service.js";
+import { projectLogoPng } from "./helpers/project-logo.js";
 
 function fixture() {
   const dataDir = mkdtempSync(join(tmpdir(), "qahwa-tasks-test-"));
@@ -258,6 +259,22 @@ test("rejects unsafe project logo content and oversized files", () => {
     assert.throws(() => tasks.uploadProjectLogo(project.id, Buffer.from("not an image"), "image/png", "user"), /PNG, JPEG, or WebP/);
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
     assert.throws(() => tasks.uploadProjectLogo(project.id, jpeg, "image/png", "user"), /does not match/);
-    assert.throws(() => tasks.uploadProjectLogo(project.id, Buffer.alloc(256 * 1024 + 1), "image/png", "user"), /256 KB/);
+    assert.throws(() => tasks.uploadProjectLogo(project.id, Buffer.alloc(0), "image/png", "user"), /empty/);
+    assert.throws(() => tasks.uploadProjectLogo(project.id, projectLogoPng(2 * 1024 * 1024 + 1), "image/png", "user"), /2 MB/);
+  } finally { database.close(); }
+});
+
+test("project logo storage accepts the 2 MiB boundary and preserves it after rejection", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    for (const size of [256 * 1024 + 1, 2 * 1024 * 1024]) {
+      const uploaded = tasks.uploadProjectLogo(project.id, projectLogoPng(size), "image/png", "user");
+      assert.equal(uploaded.logo?.size, size);
+    }
+    const savedPath = tasks.projectLogoFile(project.id).path;
+    assert.throws(() => tasks.uploadProjectLogo(project.id, projectLogoPng(2 * 1024 * 1024 + 1), "image/png", "user"), /2 MB/);
+    assert.equal(tasks.projectLogoFile(project.id).path, savedPath);
+    assert.equal(existsSync(savedPath), true);
+    assert.equal(readdirSync(join(database.dataDir, "project-logos")).length, 1);
   } finally { database.close(); }
 });

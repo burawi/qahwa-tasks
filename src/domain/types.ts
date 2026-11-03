@@ -8,6 +8,16 @@ export type SessionSurface = "undecided" | "chat" | "design";
 export type SessionRunState = "not_started" | "idle" | "running" | "waiting" | "failed" | "interrupted";
 export type SessionOwnerType = "task" | "orchestrator";
 export type TaskIntakeState = "pending" | "ready";
+export type TaskAccessMode = "read-only" | "worktree-write";
+
+export interface ChatAttachment {
+  id: string;
+  filename: string;
+  mediaType: string;
+  size: number;
+  status: "available" | "expired";
+  previewUrl: string;
+}
 
 export interface RichTextNode {
   type?: string;
@@ -42,6 +52,8 @@ export interface ProjectLogo {
 }
 
 export interface TaskSummary {
+  /** Missing on older clients/fixtures means Codex. */
+  sessionKind?: "codex" | "terminal";
   id: string;
   humanId: string;
   projectId: string;
@@ -59,8 +71,40 @@ export interface TaskSummary {
   sessionState: SessionRunState;
   surface: SessionSurface;
   lastActivityAt: string | null;
+  /** Presentation preference; never changes task priority or scheduling. */
+  pinnedAt?: string | null;
+  conversation?: {
+    /** Plain description text for list search; excludes conversation messages. */
+    descriptionText?: string;
+    activityAt: string;
+    latestMessage: { preview: string; role: "user" | "assistant"; createdAt: string } | null;
+    unreadCount: number;
+  };
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SelectedTaskReference {
+  id: string;
+  humanId: string;
+  title: string;
+}
+
+export interface ChatExcerpt {
+  messageId: string;
+  excerpt: string;
+  role: "user" | "assistant" | "system";
+}
+
+export interface GuidanceDelivery {
+  messageId: string;
+  taskId: string;
+  taskTitle: string;
+  status: "saved" | "pending" | "delivered" | "failed";
+  detail: string;
+  uncertain: boolean;
+  expectedTurnId: string | null;
+  turnId: string | null;
 }
 
 export interface ChatMessage {
@@ -70,8 +114,22 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   body: string;
   itemId: string | null;
-  metadata: Record<string, unknown> | null;
+  metadata: (Record<string, unknown> & { attachments?: ChatAttachment[]; files?: TaskArtifact[]; selectedTasks?: SelectedTaskReference[]; designPageId?: string | null; selectedExcerpt?: ChatExcerpt }) | null;
   createdAt: string;
+  pending?: boolean;
+  cancelledAt?: string | null;
+  canCancel?: boolean;
+  canEdit?: boolean;
+  canRunNow?: boolean;
+  version?: number;
+  editedAt?: string | null;
+  schedule?: MessageSchedule | null;
+  guidanceDeliveries?: GuidanceDelivery[];
+}
+
+export interface ChatReadState {
+  unreadMessageIds: string[];
+  unreadCount: number;
 }
 
 export interface AgentSession {
@@ -84,6 +142,13 @@ export interface AgentSession {
   runState: SessionRunState;
   generation: number;
   intakeState: TaskIntakeState;
+  /** Requested mode for the next turn; missing on older clients means exclusive editing. */
+  accessMode?: TaskAccessMode;
+  /** Immutable grant held by a running/waiting/starting turn. */
+  activeAccessMode?: TaskAccessMode;
+  activeAccessVersion?: number;
+  accessVersion?: number;
+  accessReason?: string | null;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
@@ -107,6 +172,15 @@ export interface DesignDocument {
   css: string;
 }
 
+export interface DesignPage {
+  id: string;
+  name: string;
+  document: DesignDocument;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface WorkActivity {
   id: string;
   kind: "thinking" | "command" | "edit" | "tool" | "search" | "error";
@@ -118,14 +192,52 @@ export interface WorkActivity {
   updatedAt: string;
 }
 
+export interface TaskSchedule {
+  taskId: string;
+  version: number;
+  localTime: string;
+  timezone: string;
+  runAt: string;
+  policy: "when_available" | "skip_if_missed";
+  state: "pending" | "reserved" | "started" | "skipped" | "cancelled" | "interrupted";
+  updatedAt: string;
+  reason: string | null;
+}
+
+export interface MessageSchedule extends Omit<TaskSchedule, "state"> {
+  messageId: string;
+  state: "pending" | "reserved" | "delivered" | "skipped" | "cancelled" | "interrupted";
+}
+
 export interface TaskWorkspace {
+  modelSettings?: import("./chat-model.js").ChatModelSettings;
+  hasPendingMessages?: boolean;
+  canScheduleFollowup?: boolean;
+  schedule?: TaskSchedule | null;
   session: AgentSession;
   messages: ChatMessage[];
+  history?: MessageHistoryPage;
   pendingRequests: PendingRequest[];
   design: { document: DesignDocument; revision: number; updatedAt: string } | null;
-  designVersions: Array<{ id: string; name: string; document: DesignDocument; revision: number; createdAt: string }>;
+  designPages: DesignPage[];
+  selectedDesignPageId: string | null;
   recentEvents: Array<{ type: string; createdAt: string }>;
   workActivities: WorkActivity[];
+}
+
+export interface MessageHistoryPage {
+  oldestCursor: string | null;
+  hasOlder: boolean;
+}
+
+export interface MessagePage extends MessageHistoryPage {
+  messages: ChatMessage[];
+}
+
+export interface MessagePageQuery {
+  before?: string;
+  /** Inclusive oldest boundary when reconciling already loaded history. */
+  through?: string;
 }
 
 export interface RelatedTask {
@@ -171,6 +283,8 @@ export interface TaskOutput {
 }
 
 export interface TaskDetail extends TaskSummary {
+  canEdit?: boolean;
+  idleNotificationsEnabled: boolean;
   rootDirectory: string;
   description: RichTextDocument;
   comments: TaskComment[];
@@ -211,7 +325,7 @@ export type ArtifactReference = string | {
   size?: number;
 };
 
-export type ArtifactPreviewKind = "image" | "video" | "pdf" | "none";
+export type ArtifactPreviewKind = "image" | "video" | "audio" | "pdf" | "text" | "none";
 export type ArtifactAvailability = "available" | "external" | "missing" | "unsupported" | "too_large" | "outside_scope";
 
 export interface TaskArtifact {
@@ -269,4 +383,34 @@ export function documentFromSections(sections: Array<{ heading: string; body: st
     }
   }
   return { type: "doc", content: content.length ? content : [{ type: "paragraph" }] };
+}
+
+/** Conditional polling uses the same authenticated, encrypted request transport. */
+export interface WorkspaceCursor {
+  revision?: string;
+  messagesRevision?: string;
+}
+
+export interface TerminalView {
+  closed: boolean;
+  messages: ChatMessage[];
+  screenText: string;
+  alternateScreen: boolean;
+  atPrompt: boolean;
+  generation: string;
+  state: "running" | "exited" | "interrupted" | "failed";
+  cols: number;
+  rows: number;
+  cursor: number;
+  /** Serialized screen including scrollback and alternate screen on resync. */
+  reset: boolean;
+  data: string;
+  exitCode: number | null;
+  error: string | null;
+}
+export type WorkspaceUpdate = Omit<TaskWorkspace, "messages"> & { messages?: ChatMessage[] };
+export interface WorkspacePoll {
+  workspace: WorkspaceUpdate | null;
+  revision: string;
+  messagesRevision: string;
 }
