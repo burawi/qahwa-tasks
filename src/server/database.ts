@@ -537,6 +537,40 @@ CREATE TABLE IF NOT EXISTS team_dispatches (
 );
 CREATE INDEX IF NOT EXISTS idx_team_dispatches_source ON team_dispatches(source_type, source_id, created_at);
 
+CREATE TABLE IF NOT EXISTS team_management_requests (
+  id TEXT PRIMARY KEY,
+  meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  source_message_id TEXT NOT NULL REFERENCES meeting_messages(id) ON DELETE CASCADE,
+  requester_type TEXT NOT NULL CHECK(requester_type IN ('orchestrator','member')),
+  requester_id TEXT NOT NULL,
+  requester_name TEXT NOT NULL,
+  requester_title TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('evidence','work','review')),
+  summary TEXT NOT NULL,
+  project_id TEXT REFERENCES projects(id),
+  task_id TEXT REFERENCES tasks(id),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delegated','awaiting_review','changes_requested','approved','failed')),
+  latest_feedback TEXT,
+  review_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(source_message_id, requester_type, requester_id, summary)
+);
+CREATE INDEX IF NOT EXISTS idx_team_management_status
+  ON team_management_requests(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS team_evidence_artifacts (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  project_id TEXT REFERENCES projects(id),
+  kind TEXT NOT NULL CHECK(kind IN ('screenshot','image')),
+  source TEXT NOT NULL,
+  path TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_team_evidence_owner
+  ON team_evidence_artifacts(owner_id, created_at DESC);
+
 `;
 
 export class AppDatabase {

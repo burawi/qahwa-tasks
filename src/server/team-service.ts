@@ -28,6 +28,37 @@ export type OrchestratorMeetingAccess = {
   candidates?: Array<Pick<MeetingSummary, "id" | "title" | "status">>;
   meeting?: { id: string; title: string; status: MeetingSummary["status"]; participants: MeetingParticipant[]; transcript: MeetingMessage[] };
 };
+export type SupervisorProjectScope = {
+  id: string;
+  name: string;
+  rootDirectory: string;
+  allowedUrls: string[];
+  recentTasks: Array<{ id: string; humanId: string; title: string; status: string; summary: string; artifacts: string[] }>;
+};
+export type SupervisorScope = {
+  ownerId: string;
+  meetingId: string | null;
+  taskId: string | null;
+  projects: SupervisorProjectScope[];
+};
+export type TeamManagementRequest = {
+  id: string;
+  meetingId: string;
+  sourceMessageId: string;
+  requesterType: MeetingParticipant["type"];
+  requesterId: string;
+  requesterName: string;
+  requesterTitle: string;
+  kind: "evidence" | "work" | "review";
+  summary: string;
+  projectId: string | null;
+  taskId: string | null;
+  status: "pending" | "delegated" | "awaiting_review" | "changes_requested" | "approved" | "failed";
+  latestFeedback: string | null;
+  reviewCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
 type MemberSessionRow = {
   id: string; member_id: string; kind: TeamMemberSession["kind"]; task_id: string | null; title: string;
   archived_at: string | null; created_at: string; updated_at: string;
@@ -43,6 +74,22 @@ const meetingOwnerParts = (ownerId: string) => {
   const match = /^team-meeting:([^:]+):(orchestrator|member):(.+)$/.exec(ownerId);
   return match ? { meetingId: match[1]!, type: match[2]! as MeetingParticipant["type"], id: match[3]! } : null;
 };
+
+function urlsIn(text: string): string[] {
+  return [...text.matchAll(/https?:\/\/[^\s<>"')\]]+/gi)].flatMap(match => {
+    try {
+      const url = new URL(match[0]!.replace(/[.,;:!?]+$/, ""));
+      url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+      return [url.toString()];
+    } catch { return []; }
+  });
+}
+
+function safeContextText(text: string): string {
+  return text
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/((?:authorization|api[_-]?key|token|password|secret|cookie|credential)\s*[:=]\s*)[^\s'";,]+/gi, "$1[redacted]");
+}
 
 function cleanText(value: unknown, label: string, maximum: number): string {
   assertDomain(typeof value === "string" && value.trim().length > 0 && value.trim().length <= maximum,
@@ -164,6 +211,123 @@ export class TeamService {
     if (!meetingOwner) return null;
     return this.getMeeting(meetingOwner.meetingId).participants.find(participant =>
       participant.type === meetingOwner.type && participant.id === meetingOwner.id) ?? null;
+  }
+
+  supervisorScope(ownerId: string, currentText = ""): SupervisorScope {
+    const sessionId = sessionIdFromOwner(ownerId);
+    const meetingOwner = meetingOwnerParts(ownerId);
+    const taskSession = sessionId ? this.database.db.prepare("SELECT task_id FROM team_member_sessions WHERE id=?")
+      .get(sessionId) as { task_id: string | null } | undefined : undefined;
+    const meetingText = meetingOwner ? this.messages(meetingOwner.meetingId).map(message => message.body).join("\n") : "";
+    const ownerHistory = (this.database.db.prepare(`SELECT body FROM chat_messages WHERE owner_type='orchestrator' AND owner_id=?
+      AND cancelled_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 24`).all(ownerId) as Array<{ body: string }>).map(row => row.body).join("\n");
+    const context = `${meetingText}\n${ownerHistory}\n${currentText}`.normalize("NFKC").toLocaleLowerCase();
+    const allProjects = this.database.db.prepare(`SELECT id,name,root_directory FROM projects
+      WHERE archived_at IS NULL ORDER BY name COLLATE NOCASE`).all() as Array<{ id: string; name: string; root_directory: string }>;
+    const taskProject = taskSession?.task_id ? this.database.db.prepare(`SELECT p.id FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.id=?`)
+      .get(taskSession.task_id) as { id: string } | undefined : undefined;
+    const selected = allProjects.filter(project => project.id === taskProject?.id
+      || context.includes(project.name.normalize("NFKC").toLocaleLowerCase()));
+    const projects = selected.map(project => {
+      const tasks = this.database.db.prepare(`SELECT id,human_id,title,status,description_text FROM tasks
+        WHERE project_id=? ORDER BY updated_at DESC LIMIT 12`).all(project.id) as Array<{
+          id: string; human_id: string; title: string; status: string; description_text: string;
+        }>;
+      const recentTasks = tasks.map(task => {
+        const messages = this.database.db.prepare(`SELECT body FROM chat_messages WHERE owner_type='task' AND owner_id=?
+          AND cancelled_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 8`).all(task.id) as Array<{ body: string }>;
+        const outputs = this.database.db.prepare(`SELECT summary,artifacts_json FROM task_outputs WHERE task_id=?
+          ORDER BY created_at DESC,rowid DESC LIMIT 3`).all(task.id) as Array<{ summary: string; artifacts_json: string }>;
+        const artifactPaths = outputs.flatMap(output => {
+          try {
+            return (JSON.parse(output.artifacts_json) as Array<string | { path?: string }>).flatMap(item =>
+              typeof item === "string" ? [item] : typeof item.path === "string" ? [item.path] : []);
+          } catch { return []; }
+        });
+        return { id: task.id, humanId: task.human_id, title: task.title, status: task.status,
+          summary: safeContextText(outputs[0]?.summary ?? messages[0]?.body.slice(0, 2_000) ?? task.description_text.slice(0, 2_000)), artifacts: artifactPaths.slice(0, 20) };
+      });
+      const urlText = [currentText, meetingText, ownerHistory, ...tasks.flatMap(task => {
+        const rows = this.database.db.prepare(`SELECT body FROM chat_messages WHERE owner_type='task' AND owner_id=?
+          AND body LIKE '%http%' ORDER BY created_at DESC,rowid DESC LIMIT 20`).all(task.id) as Array<{ body: string }>;
+        return [task.description_text, ...rows.map(row => row.body)];
+      })].join("\n");
+      return { id: project.id, name: project.name, rootDirectory: project.root_directory,
+        allowedUrls: [...new Set(urlsIn(urlText))].slice(0, 100), recentTasks };
+    });
+    return { ownerId, meetingId: meetingOwner?.meetingId ?? null, taskId: taskSession?.task_id ?? null, projects };
+  }
+
+  createManagementRequest(input: {
+    meetingId: string; sourceMessageId: string; requester: MeetingParticipant;
+    kind: TeamManagementRequest["kind"]; summary: string; projectId?: string | null; taskId?: string | null;
+  }): TeamManagementRequest {
+    this.getMeeting(input.meetingId);
+    const summary = cleanText(input.summary, "Management request", 10_000);
+    if (input.projectId) assertDomain(this.database.db.prepare("SELECT 1 FROM projects WHERE id=? AND archived_at IS NULL").get(input.projectId),
+      "Project not found", "project_not_found", 404);
+    if (input.taskId) assertDomain(this.database.db.prepare("SELECT 1 FROM tasks WHERE id=? OR human_id=?").get(input.taskId, input.taskId),
+      "Task not found", "task_not_found", 404);
+    let task: { id: string; project_id: string } | null = null;
+    if (input.taskId) task = this.database.db.prepare("SELECT id,project_id FROM tasks WHERE id=? OR human_id=?")
+      .get(input.taskId, input.taskId) as { id: string; project_id: string };
+    const id = randomUUID(); const timestamp = now();
+    this.database.db.prepare(`INSERT OR IGNORE INTO team_management_requests
+      (id,meeting_id,source_message_id,requester_type,requester_id,requester_name,requester_title,kind,summary,project_id,task_id,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.meetingId, input.sourceMessageId, input.requester.type, input.requester.id,
+        input.requester.name, input.requester.title, input.kind, summary, input.projectId ?? task?.project_id ?? null, task?.id ?? null, timestamp, timestamp);
+    const row = this.database.db.prepare(`SELECT id FROM team_management_requests WHERE source_message_id=? AND requester_type=? AND requester_id=? AND summary=?`)
+      .get(input.sourceMessageId, input.requester.type, input.requester.id, summary) as { id: string };
+    return this.getManagementRequest(row.id);
+  }
+
+  managementRequests(statuses?: TeamManagementRequest["status"][]): TeamManagementRequest[] {
+    const where = statuses?.length ? `WHERE status IN (${statuses.map(() => "?").join(",")})` : "";
+    return (this.database.db.prepare(`SELECT * FROM team_management_requests ${where} ORDER BY updated_at,created_at`).all(...(statuses ?? [])) as any[])
+      .map(row => this.managementRequestFromRow(row));
+  }
+
+  getManagementRequest(id: string): TeamManagementRequest {
+    const row = this.database.db.prepare("SELECT * FROM team_management_requests WHERE id=?").get(id) as any;
+    assertDomain(row, "Management request not found", "management_request_not_found", 404);
+    return this.managementRequestFromRow(row);
+  }
+
+  delegateManagementRequest(id: string, taskId: string): TeamManagementRequest {
+    const request = this.getManagementRequest(id);
+    assertDomain(["pending", "changes_requested"].includes(request.status), "Management request is not ready for delegation", "management_request_state", 409);
+    const task = this.database.db.prepare("SELECT id,project_id FROM tasks WHERE id=? OR human_id=?").get(taskId, taskId) as { id: string; project_id: string } | undefined;
+    assertDomain(task, "Task not found", "task_not_found", 404);
+    assertDomain(!request.projectId || request.projectId === task.project_id, "Task is outside the request project", "management_project_mismatch", 403);
+    this.database.db.prepare(`UPDATE team_management_requests SET task_id=?,project_id=?,status='delegated',updated_at=? WHERE id=?`)
+      .run(task.id, task.project_id, now(), id);
+    return this.getManagementRequest(id);
+  }
+
+  markManagementReviewQueued(id: string): TeamManagementRequest {
+    this.database.db.prepare(`UPDATE team_management_requests SET status='awaiting_review',updated_at=?
+      WHERE id=? AND status IN ('delegated','changes_requested')`).run(now(), id);
+    return this.getManagementRequest(id);
+  }
+
+  saveManagementReview(id: string, decision: "approved" | "changes_requested", feedback: string): TeamManagementRequest {
+    this.database.db.prepare(`UPDATE team_management_requests SET status=?,latest_feedback=?,review_count=review_count+1,updated_at=?
+      WHERE id=? AND status='awaiting_review'`).run(decision, feedback.slice(0, 20_000), now(), id);
+    return this.getManagementRequest(id);
+  }
+
+  failManagementRequest(id: string, detail: string): TeamManagementRequest {
+    this.database.db.prepare(`UPDATE team_management_requests SET status='failed',latest_feedback=?,updated_at=? WHERE id=?`)
+      .run(detail.slice(0, 10_000), now(), id);
+    return this.getManagementRequest(id);
+  }
+
+  private managementRequestFromRow(row: any): TeamManagementRequest {
+    return { id: row.id, meetingId: row.meeting_id, sourceMessageId: row.source_message_id,
+      requesterType: row.requester_type, requesterId: row.requester_id, requesterName: row.requester_name,
+      requesterTitle: row.requester_title, kind: row.kind, summary: row.summary, projectId: row.project_id,
+      taskId: row.task_id, status: row.status, latestFeedback: row.latest_feedback, reviewCount: row.review_count,
+      createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
   private memberSessionFromRow(row: MemberSessionRow): TeamMemberSession {

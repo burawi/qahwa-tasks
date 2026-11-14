@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
+import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, isolatedSupervisorEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
 import { readFileSync } from "node:fs";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
@@ -44,9 +44,17 @@ test("spawned Codex sessions cannot inherit Orca routing or parent session ident
   const environment = isolatedCodexEnvironment({
     PATH: "/bin", ORCA_TAB_ID: "orca-tab", ORCA_AGENT_HOOK_TOKEN: "secret",
     JCODE_RUNTIME_DIR: "/tmp/jcode", CODEX_SESSION_ID: "parent", CODEX_THREAD_ID: "thread",
-    CODEX_TOOL_CALL_ID: "call", INVOCATION_ID: "invocation",
+    CODEX_TOOL_CALL_ID: "call", INVOCATION_ID: "invocation", SAFE_SETTING: "kept",
   });
-  assert.deepEqual(environment, { PATH: "/bin" });
+  assert.deepEqual(environment, { PATH: "/bin", SAFE_SETTING: "kept" });
+});
+
+test("supervisor Codex sessions cannot inherit credentials", () => {
+  const environment = isolatedSupervisorEnvironment({
+    PATH: "/bin", ORCA_TAB_ID: "orca-tab", CLOUDFLARE_API_TOKEN: "cloud-secret",
+    SERVICE_PASSWORD: "password", CONNECTOR_CREDENTIAL_FILE: "/private/credential", SAFE_SETTING: "kept",
+  });
+  assert.deepEqual(environment, { PATH: "/bin", SAFE_SETTING: "kept" });
 });
 
 test("orchestrator actions require evidence from the current user turn, not keyword interpretation", () => {

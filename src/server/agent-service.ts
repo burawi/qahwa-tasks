@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import readline from "node:readline";
 import { DomainError, assertDomain } from "../domain/errors.js";
 import {
+  documentFromPlainText,
   plainTextFromDocument,
   type AgentSession,
   type ChatMessage,
@@ -43,7 +44,7 @@ import { FILE_DELIVERY_INSTRUCTIONS, MessageFiles } from "./message-files.js";
 import { SessionResources } from "./session-resources.js";
 import { canonicalRoot, editingBlocker } from "./task-access.js";
 import { GuidanceDeliveries, rejectedCodexRequest, staleGuidanceTurn } from "./guidance-delivery.js";
-import { TeamService, meetingParticipantOwnerId, memberSessionOwnerId } from "./team-service.js";
+import { TeamService, meetingParticipantOwnerId, memberSessionOwnerId, type SupervisorScope, type TeamManagementRequest } from "./team-service.js";
 
 type JsonObject = Record<string, unknown>;
 type Owner = { ownerType: SessionOwnerType; ownerId: string };
@@ -61,7 +62,13 @@ type OrchestratorAction =
   | ({ type: "member_update"; memberId: string; name?: string; title?: string; instructions?: string } & DirectedAction)
   | ({ type: "member_avatar"; memberId: string; attachmentId: string } & DirectedAction)
   | ({ type: "member_delete"; memberId: string } & DirectedAction)
-  | ({ type: "consult"; memberId: string; taskId: string; message: string } & DirectedAction);
+  | ({ type: "consult"; memberId: string; taskId: string; message: string } & DirectedAction)
+  | ({ type: "management_delegate"; requestId: string; taskId: string; message: string } & DirectedAction)
+  | ({ type: "management_create_task"; requestId: string; projectId: string; title: string; description: string; accessMode: TaskAccessMode } & DirectedAction)
+  | ({ type: "management_feedback"; requestId: string; message: string } & DirectedAction);
+
+type ManagementSignal = { kind: "evidence" | "work" | "review"; summary: string; projectId?: string; taskId?: string };
+type ReviewSignal = { decision: "approved" | "changes_requested"; feedback: string };
 
 type OrchestratorOutcome = { status: "applied" | "queued" | "failed"; message: string };
 
@@ -146,6 +153,14 @@ export function isolatedCodexEnvironment(source: NodeJS.ProcessEnv = process.env
   return environment;
 }
 
+export function isolatedSupervisorEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const environment = isolatedCodexEnvironment(source);
+  for (const key of Object.keys(environment)) {
+    if (/(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PRIVATE_?KEY|CREDENTIAL|COOKIE)(?:_|$)/i.test(key)) delete environment[key];
+  }
+  return environment;
+}
+
 function object(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : {};
 }
@@ -158,6 +173,42 @@ function cleanActivityText(value: unknown, limit = 900): string | null {
     .trim();
   if (!cleaned) return null;
   return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned;
+}
+
+const SUPERVISOR_POLICY_VERSION = "2026-11-management-v1";
+const SUPERVISOR_DYNAMIC_TOOLS = [{
+  type: "namespace", name: "qahwa_evidence",
+  description: "Read-only, project-scoped evidence inspection controlled by Qahwa. It never reuses browser credentials.",
+  tools: [
+    { type: "function", name: "inspect_page", description: "Render an approved project URL in a fresh credential-free browser, capture a screenshot, and return visible text.",
+      inputSchema: { type: "object", properties: { url: { type: "string" }, fullPage: { type: "boolean" } }, required: ["url"], additionalProperties: false } },
+    { type: "function", name: "view_image", description: "Open an existing PNG, JPEG, or WebP evidence image inside an approved project root.",
+      inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false } },
+  ],
+}];
+
+function executableOnPath(name: string): string | null {
+  for (const directory of (process.env.PATH ?? "").split(":")) {
+    if (!directory) continue;
+    try { return realpathSync(join(directory, name)); } catch { /* keep looking */ }
+  }
+  return null;
+}
+
+function runProcess(command: string, args: string[], options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: options.env ?? process.env });
+    let stdout = ""; let stderr = ""; let settled = false;
+    const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new Error("Evidence capture timed out")); }, options.timeoutMs ?? 30_000);
+    const finish = (error?: Error) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      if (error) reject(error); else resolvePromise({ stdout, stderr });
+    };
+    child.stdout.on("data", chunk => { if (stdout.length < 200_000) stdout += String(chunk); });
+    child.stderr.on("data", chunk => { if (stderr.length < 20_000) stderr += String(chunk); });
+    child.on("error", error => finish(error));
+    child.on("exit", code => code === 0 ? finish() : finish(new Error(stderr.trim() || `Evidence browser exited with code ${code}`)));
+  });
 }
 
 function displayCommand(item: JsonObject): string | null {
@@ -297,6 +348,7 @@ export function parseAgentEnvelope(text: string): {
   body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean;
   startTasks: string[]; priorityTasks: string[]; intakeReady?: boolean; intakeAccessMode?: TaskAccessMode;
   accessRequest?: { mode: TaskAccessMode; authorization: string }; contextRollover?: string; silent: boolean; actions: OrchestratorAction[];
+  management?: ManagementSignal; managementReview?: ReviewSignal;
 } {
   let body = text.trim();
   let intakeAccessMode: TaskAccessMode | undefined;
@@ -311,6 +363,8 @@ export function parseAgentEnvelope(text: string): {
   const actions: OrchestratorAction[] = [];
   let intakeReady: boolean | undefined;
   let contextRollover: string | undefined;
+  let management: ManagementSignal | undefined;
+  let managementReview: ReviewSignal | undefined;
   let silent = false;
   const metadata = /<!--\s*qahwa:(\{[\s\S]*?\})\s*-->/i.exec(body);
   if (metadata) {
@@ -373,6 +427,27 @@ export function parseAgentEnvelope(text: string): {
     } catch { /* Invalid rollover requests remain inert. */ }
     return "";
   }).trim();
+  body = body.replace(/<!--\s*qahwa-management:(\{[\s\S]*?\})\s*-->/i, (_match, value: string) => {
+    try {
+      const request = object(JSON.parse(value));
+      if (["evidence", "work", "review"].includes(String(request.kind)) && typeof request.summary === "string" && request.summary.trim()) {
+        management = { kind: request.kind as ManagementSignal["kind"], summary: request.summary.trim().slice(0, 10_000),
+          ...(typeof request.projectId === "string" ? { projectId: request.projectId } : {}),
+          ...(typeof request.taskId === "string" ? { taskId: request.taskId.toUpperCase() } : {}) };
+      }
+    } catch { /* Invalid management requests remain inert. */ }
+    return "";
+  }).trim();
+  body = body.replace(/<!--\s*qahwa-management-review:(\{[\s\S]*?\})\s*-->/i, (_match, value: string) => {
+    try {
+      const reviewSignal = object(JSON.parse(value));
+      if ((reviewSignal.decision === "approved" || reviewSignal.decision === "changes_requested")
+        && typeof reviewSignal.feedback === "string" && reviewSignal.feedback.trim()) {
+        managementReview = { decision: reviewSignal.decision, feedback: reviewSignal.feedback.trim().slice(0, 20_000) };
+      }
+    } catch { /* Invalid review requests remain inert. */ }
+    return "";
+  }).trim();
   body = body.replace(/<!--\s*qahwa-actions:(\[[\s\S]*?\])\s*-->/i, (_match, value: string) => {
     try {
       for (const candidate of JSON.parse(value) as Array<Record<string, unknown>>) {
@@ -407,13 +482,26 @@ export function parseAgentEnvelope(text: string): {
         else if (type === "consult" && typeof candidate.memberId === "string" && taskId && typeof candidate.message === "string") actions.push({
           type, memberId: candidate.memberId, taskId, message: candidate.message.trim().slice(0, 30_000), ...directed,
         });
+        else if (type === "management_delegate" && typeof candidate.requestId === "string" && taskId && typeof candidate.message === "string") actions.push({
+          type, requestId: candidate.requestId, taskId, message: candidate.message.trim().slice(0, 30_000), ...directed,
+        });
+        else if (type === "management_create_task" && typeof candidate.requestId === "string" && typeof candidate.projectId === "string"
+          && typeof candidate.title === "string" && typeof candidate.description === "string"
+          && (candidate.accessMode === "read-only" || candidate.accessMode === "worktree-write")) actions.push({
+          type, requestId: candidate.requestId, projectId: candidate.projectId, title: candidate.title.trim().slice(0, 300),
+          description: candidate.description.trim().slice(0, 30_000), accessMode: candidate.accessMode, ...directed,
+        });
+        else if (type === "management_feedback" && typeof candidate.requestId === "string" && typeof candidate.message === "string") actions.push({
+          type, requestId: candidate.requestId, message: candidate.message.trim().slice(0, 30_000), ...directed,
+        });
       }
     } catch { /* malformed actions remain inert */ }
     return "";
   }).trim();
   for (const taskId of startTasks) actions.push({ type: "start", taskId, authorization: "" });
   if (priorityTasks.length) actions.push({ type: "priority", taskIds: priorityTasks, authorization: "" });
-  return { body, message, tone, surface, design, review, startTasks, priorityTasks, intakeReady, intakeAccessMode, accessRequest, contextRollover, silent, actions };
+  return { body, message, tone, surface, design, review, startTasks, priorityTasks, intakeReady, intakeAccessMode, accessRequest,
+    contextRollover, management, managementReview, silent, actions };
 }
 
 class CodexAppServer {
@@ -424,7 +512,8 @@ class CodexAppServer {
   private nextId = 1;
   private readonly pending = new Map<number, RpcPending>();
 
-  constructor(private readonly onMessage: (message: JsonObject) => void) {}
+  constructor(private readonly onMessage: (message: JsonObject) => void,
+    private readonly environment: () => NodeJS.ProcessEnv = () => isolatedCodexEnvironment()) {}
 
   get ready(): boolean { return this.initialized; }
 
@@ -484,7 +573,7 @@ class CodexAppServer {
     if (this.child) return;
     this.child = spawn("codex", ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: isolatedCodexEnvironment(),
+      env: this.environment(),
     });
     readline.createInterface({ input: this.child.stdout }).on("line", (line) => {
       try { this.handle(JSON.parse(line) as JsonObject); } catch { /* app-server may emit a partial diagnostic */ }
@@ -531,6 +620,7 @@ export class AgentService {
   private readonly scheduleTimer: NodeJS.Timeout;
   private drainingSchedules = false;
   private readonly codex: CodexAppServer;
+  private readonly supervisorCodex: CodexAppServer;
   readonly taskTitles: CodexTaskTitles;
   readonly usage: CodexUsageService;
   readonly models: ChatModels;
@@ -557,18 +647,23 @@ export class AgentService {
     private readonly idleNotifier?: { completed(taskId: string, threadId: string, turnId: string): Promise<void> }) {
     this.files = new MessageFiles(database);
     this.team = new TeamService(database);
+    this.upgradeSupervisorPolicy();
     this.guidance = new GuidanceDeliveries(database);
     this.guidance.recover();
     this.schedules = new TaskSchedules(database, tasks);
     this.schedules.recover();
     this.messageSchedules = new MessageSchedules(database, tasks);
     this.messageSchedules.recover();
-    this.codex = new CodexAppServer((message) => this.handleCodexMessage(message));
+    this.codex = new CodexAppServer((message) => this.handleCodexMessage(message, this.codex));
+    this.supervisorCodex = new CodexAppServer(
+      (message) => this.handleCodexMessage(message, this.supervisorCodex),
+      () => isolatedSupervisorEnvironment());
     this.resources = new SessionResources(async threadId => {
-      const result = await this.codex.request("thread/unsubscribe", { threadId }, 15_000);
+      const owner = this.ownerFromIds(threadId, null);
+      const runtime = owner ? this.runtimeForOwner(owner.ownerType, owner.ownerId) : this.codex;
+      const result = await runtime.request("thread/unsubscribe", { threadId }, 15_000);
       assertDomain(["unsubscribed", "notSubscribed", "notLoaded"].includes(result?.status),
         "Codex did not acknowledge thread unsubscribe", "codex_unsubscribe_failed", 503);
-      const owner = this.ownerFromIds(threadId, null);
       if (!this.closed && owner) this.recordEvent(owner, "session.unsubscribed", { threadId, status: result.status });
     });
     this.models = new ChatModels(database, {
@@ -608,34 +703,149 @@ export class AgentService {
     void this.monitorPortfolio();
   }
 
+  private upgradeSupervisorPolicy(): void {
+    if (this.database.setting("supervisor_policy_version") === SUPERVISOR_POLICY_VERSION) return;
+    const timestamp = isoNow();
+    const rows = this.database.db.prepare(`SELECT owner_id,thread_id FROM agent_sessions
+      WHERE owner_type='orchestrator' AND owner_id!='main' AND thread_id IS NOT NULL`).all() as Array<{ owner_id: string; thread_id: string }>;
+    this.database.db.transaction(() => {
+      this.database.db.prepare(`UPDATE agent_sessions SET thread_id=NULL,active_turn_id=NULL,run_state='idle',generation=generation+1,
+        last_error=NULL,updated_at=? WHERE owner_type='orchestrator' AND owner_id!='main'`).run(timestamp);
+      for (const row of rows) this.addMessage("orchestrator", row.owner_id, "system",
+        "New protected supervisor session started with project-scoped read-only evidence access.",
+        { contextRollover: true, policyUpgrade: SUPERVISOR_POLICY_VERSION });
+      this.database.setSetting("supervisor_policy_version", SUPERVISOR_POLICY_VERSION);
+    })();
+  }
+
+  private supervisorScope(ownerId: string, currentText = ""): SupervisorScope | null {
+    if (ownerId === "main" || (!this.team.memberForOwner(ownerId) && !this.team.participantForOwner(ownerId))) return null;
+    return this.team.supervisorScope(ownerId, currentText);
+  }
+
+  private runtimeForOwner(ownerType: SessionOwnerType, ownerId: string): CodexAppServer {
+    return ownerType === "orchestrator" && ownerId !== "main" ? this.supervisorCodex : this.codex;
+  }
+
+  private supervisorExecution(scope: SupervisorScope | null): JsonObject {
+    if (!scope) return {};
+    return {
+      runtimeWorkspaceRoots: scope.projects.map(project => project.rootDirectory),
+      config: {
+        apps: { _default: { enabled: true, approvals_reviewer: "user", destructive_enabled: false,
+          open_world_enabled: false, default_tools_approval_mode: "prompt" } },
+        mcp_servers: { qahwa_tasks: { enabled: false } },
+        web_search: "disabled",
+      },
+    };
+  }
+
+  private async handleSupervisorTool(runtime: CodexAppServer, owner: Owner, rpcId: string | number, params: JsonObject): Promise<void> {
+    const scope = this.supervisorScope(owner.ownerId);
+    const tool = String(params.tool ?? "");
+    const namespace = String(params.namespace ?? "");
+    const args = object(params.arguments);
+    if (!scope || namespace !== "qahwa_evidence") {
+      runtime.respond(rpcId, { contentItems: [{ type: "inputText", text: "This evidence tool is unavailable in this session." }], success: false });
+      return;
+    }
+    try {
+      if (tool === "inspect_page") await this.inspectSupervisorPage(runtime, owner, scope, rpcId, args);
+      else if (tool === "view_image") this.viewSupervisorImage(runtime, owner, scope, rpcId, args);
+      else runtime.respond(rpcId, { contentItems: [{ type: "inputText", text: "Unknown evidence tool." }], success: false });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.recordEvent(owner, "supervisor.evidence_failed", { tool, detail: cleanActivityText(detail, 500) });
+      runtime.respond(rpcId, { contentItems: [{ type: "inputText", text: `Evidence inspection failed: ${detail}` }], success: false });
+    }
+  }
+
+  private async inspectSupervisorPage(runtime: CodexAppServer, owner: Owner, scope: SupervisorScope, rpcId: string | number, args: JsonObject): Promise<void> {
+    assertDomain(typeof args.url === "string", "A URL is required", "invalid_evidence_url");
+    const requested = new URL(args.url);
+    assertDomain(requested.protocol === "http:" || requested.protocol === "https:", "Only HTTP(S) evidence URLs are allowed", "invalid_evidence_url");
+    requested.username = ""; requested.password = ""; requested.hash = "";
+    const project = scope.projects.find(candidate => candidate.allowedUrls.some(value => {
+      try { return new URL(value).origin === requested.origin; } catch { return false; }
+    }));
+    assertDomain(project, "That URL is outside this supervisor's project evidence scope", "evidence_scope_denied", 403);
+    const playwrightCli = executableOnPath("playwright");
+    assertDomain(playwrightCli, "The read-only browser is unavailable", "evidence_browser_unavailable", 503);
+    const playwrightModule = resolve(join(playwrightCli, ".."));
+    const evidenceDir = join(this.database.dataDir, "team-evidence", owner.ownerId.replace(/[^a-zA-Z0-9._-]/g, "_"));
+    mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+    const id = randomUUID(); const screenshotPath = join(evidenceDir, `${id}.png`);
+    const script = `const {chromium}=require(process.env.QAHWA_PLAYWRIGHT_MODULE);(async()=>{const b=await chromium.launch({headless:true});try{const p=await b.newPage({viewport:{width:1440,height:1000}});await p.goto(process.argv[1],{waitUntil:'networkidle',timeout:20000});if(new URL(p.url()).origin!==process.argv[4])throw new Error('Redirect left the approved project origin');await p.screenshot({path:process.argv[2],fullPage:process.argv[3]==='true'});const value=await p.evaluate(()=>({title:document.title,url:location.href,text:(document.body?.innerText||'').slice(0,30000)}));process.stdout.write(JSON.stringify(value));}finally{await b.close();}})().catch(e=>{console.error(e&&e.stack||String(e));process.exit(1)});`;
+    const result = await runProcess(process.execPath, ["-e", script, requested.toString(), screenshotPath, args.fullPage === true ? "true" : "false", requested.origin], {
+      env: { ...isolatedSupervisorEnvironment(), QAHWA_PLAYWRIGHT_MODULE: playwrightModule }, timeoutMs: 35_000,
+    });
+    const page = object(JSON.parse(result.stdout));
+    const bytes = readFileSync(screenshotPath);
+    assertDomain(bytes.length <= 12 * 1024 * 1024, "The evidence screenshot is too large", "evidence_too_large", 413);
+    this.database.db.prepare(`INSERT INTO team_evidence_artifacts(id,owner_id,project_id,kind,source,path,created_at)
+      VALUES (?,?,?,'screenshot',?,?,?)`).run(id, owner.ownerId, project.id, requested.toString(), screenshotPath, isoNow());
+    this.recordEvent(owner, "supervisor.evidence_captured", { projectId: project.id, url: requested.toString(), path: screenshotPath });
+    runtime.respond(rpcId, { success: true, contentItems: [
+      { type: "inputText", text: `Fresh credential-free browser evidence for ${page.title || requested.hostname}. Final URL: ${page.url || requested.toString()}\nSaved screenshot: ${screenshotPath}\nVisible text:\n${String(page.text ?? "").slice(0, 30_000)}` },
+      { type: "inputImage", imageUrl: `data:image/png;base64,${bytes.toString("base64")}` },
+    ] });
+  }
+
+  private viewSupervisorImage(runtime: CodexAppServer, owner: Owner, scope: SupervisorScope, rpcId: string | number, args: JsonObject): void {
+    assertDomain(typeof args.path === "string" && isAbsolute(args.path), "An absolute image path is required", "invalid_evidence_path");
+    const path = realpathSync(args.path);
+    const project = scope.projects.find(candidate => {
+      const root = realpathSync(candidate.rootDirectory);
+      const rel = relative(root, path);
+      return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+    });
+    assertDomain(project, "That image is outside this supervisor's project evidence scope", "evidence_scope_denied", 403);
+    const extension = basename(path).toLocaleLowerCase();
+    const mimeType = extension.endsWith(".png") ? "image/png" : /\.jpe?g$/.test(extension) ? "image/jpeg" : extension.endsWith(".webp") ? "image/webp" : null;
+    assertDomain(mimeType, "Only PNG, JPEG, and WebP evidence is supported", "invalid_evidence_image");
+    const bytes = readFileSync(path);
+    assertDomain(bytes.length <= 12 * 1024 * 1024, "The evidence image is too large", "evidence_too_large", 413);
+    const id = randomUUID();
+    this.database.db.prepare(`INSERT INTO team_evidence_artifacts(id,owner_id,project_id,kind,source,path,created_at)
+      VALUES (?,?,?,'image',?,?,?)`).run(id, owner.ownerId, project.id, path, path, isoNow());
+    this.recordEvent(owner, "supervisor.evidence_viewed", { projectId: project.id, path });
+    runtime.respond(rpcId, { success: true, contentItems: [
+      { type: "inputText", text: `Project-scoped image evidence: ${path}` },
+      { type: "inputImage", imageUrl: `data:${mimeType};base64,${bytes.toString("base64")}` },
+    ] });
+  }
+
   /** Sweep only known Qahwa threads in this app-server, including older idle bindings.
    * Future schedules remain durable and resume the saved thread when due. */
   private async releaseInactiveSessions(): Promise<void> {
-    if (this.closed || this.sweepingResources || !this.codex.ready) return;
+    if (this.closed || this.sweepingResources || (!this.codex.ready && !this.supervisorCodex.ready)) return;
     this.sweepingResources = true;
     try {
-      let cursor: string | null = null;
-      do {
-        const loaded = await this.codex.request("thread/loaded/list", { cursor, limit: 100 }, 15_000);
-        if (this.closed) return;
-        for (const threadId of loaded.data ?? []) {
-          if (typeof threadId !== "string" || this.resources.isReleased(threadId)) continue;
-          const row = this.database.db.prepare("SELECT * FROM agent_sessions WHERE thread_id = ?").get(threadId) as SessionRow | undefined;
-          if (!row) continue; // Never infer ownership of child, title or foreign threads.
-          const eligible = () => this.inactiveSessionEligible(row);
-          if (!eligible()) continue;
-          try {
-            // Metadata-only read does not load a persisted thread or subscribe again.
-            const read = await this.codex.request("thread/read", { threadId, includeTurns: false }, 15_000);
-            if (!["idle", "systemError"].includes(read?.thread?.status?.type)) continue;
-            await this.resources.release(threadId, eligible);
-          } catch {
-            if (!this.closed) this.recordEvent({ ownerType: row.owner_type, ownerId: row.owner_id },
-              "session.cleanup_failed", { threadId });
+      for (const runtime of [this.codex, this.supervisorCodex]) {
+        if (!runtime.ready) continue;
+        let cursor: string | null = null;
+        do {
+          const loaded = await runtime.request("thread/loaded/list", { cursor, limit: 100 }, 15_000);
+          if (this.closed) return;
+          for (const threadId of loaded.data ?? []) {
+            if (typeof threadId !== "string" || this.resources.isReleased(threadId)) continue;
+            const row = this.database.db.prepare("SELECT * FROM agent_sessions WHERE thread_id = ?").get(threadId) as SessionRow | undefined;
+            if (!row || this.runtimeForOwner(row.owner_type, row.owner_id) !== runtime) continue;
+            const eligible = () => this.inactiveSessionEligible(row);
+            if (!eligible()) continue;
+            try {
+              // Metadata-only read does not load a persisted thread or subscribe again.
+              const read = await runtime.request("thread/read", { threadId, includeTurns: false }, 15_000);
+              if (!["idle", "systemError"].includes(read?.thread?.status?.type)) continue;
+              await this.resources.release(threadId, eligible);
+            } catch {
+              if (!this.closed) this.recordEvent({ ownerType: row.owner_type, ownerId: row.owner_id },
+                "session.cleanup_failed", { threadId });
+            }
           }
-        }
-        cursor = loaded.nextCursor ?? null;
-      } while (cursor && !this.closed);
+          cursor = loaded.nextCursor ?? null;
+        } while (cursor && !this.closed);
+      }
     } catch {
       // Unsupported/failed lifecycle RPCs never fall back to archive, killing, or reset.
       // Retry on the next sweep; no local history or execution state was changed.
@@ -1043,16 +1253,18 @@ export class AgentService {
       // Reserve the slot synchronously before any app-server RPC can yield.
       this.updateSession(ownerType, ownerId, { runState: "running", lastError: null });
       session.activeAccessMode = ownerType === "orchestrator" ? "read-only" : this.nextAccessMode(session);
-      const cwd = canonicalRoot(ownerType === "task" ? this.tasks.getTask(ownerId).rootDirectory : process.cwd());
+      const supervisorScope = ownerType === "orchestrator" ? this.supervisorScope(ownerId, row.body) : null;
+      const cwd = canonicalRoot(ownerType === "task" ? this.tasks.getTask(ownerId).rootDirectory
+        : supervisorScope?.projects[0]?.rootDirectory ?? process.cwd());
       this.database.db.prepare("UPDATE agent_sessions SET active_access_mode=?,active_access_version=access_version,active_root_directory=? WHERE id=?").run(session.activeAccessMode, cwd, session.id);
       const queueIntent = ownerType === "task" ? this.database.db.prepare("SELECT requested_by,created_at FROM scheduler_queue WHERE task_id=?")
         .get(ownerId) as { requested_by: string; created_at: string } | undefined : undefined;
       this.database.db.prepare("UPDATE agent_sessions SET starting_message_id = ? WHERE owner_type = ? AND owner_id = ?").run(messageId, ownerType, ownerId);
       if (ownerType === "task") this.setPresence(ownerId, "Working", "blue", "A Codex turn is starting");
-      return { row, session, requestPageId, followup, queueIntent, cwd, modelSettings: this.models.settings(ownerType, ownerId) };
+      return { row, session, requestPageId, followup, queueIntent, cwd, supervisorScope, modelSettings: this.models.settings(ownerType, ownerId) };
     }).immediate();
     if (!reserved) return false;
-    const { row, session, requestPageId, followup, queueIntent, cwd, modelSettings } = reserved;
+    const { row, session, requestPageId, followup, queueIntent, cwd, supervisorScope, modelSettings } = reserved;
     const { owner_type: ownerType, owner_id: ownerId, body: text, role: messageRole } = row;
     const initial = Boolean(row.initial);
     let guidanceStartSent = false;
@@ -1069,14 +1281,15 @@ export class AgentService {
         const release = this.resources.beforeResume(session.threadId);
         if (release) await release;
       }
-      await this.codex.initialize();
+      const runtime = this.runtimeForOwner(ownerType, ownerId);
+      await runtime.initialize();
       assertCurrentStart();
       let conversationText = text;
       let threadId = session.threadId;
       const needsHandoff = !followup && ownerType === "task" && session.intakeState === "ready" && queueIntent?.requested_by === "intake";
       if (needsHandoff) {
         if (threadId) {
-          await this.codex.request("thread/archive", { threadId }).catch(() => undefined);
+          await runtime.request("thread/archive", { threadId }).catch(() => undefined);
           assertCurrentStart();
           assertDomain(this.tasks.getTask(ownerId).status !== "closed", "Closed tasks cannot begin implementation", "task_closed", 409);
           this.threadOwners.delete(threadId);
@@ -1097,16 +1310,17 @@ export class AgentService {
         + (ownerType === "task" ? `\n\n${chatSchedulingInstructions(messageFromRow(row), Boolean(followup))}` : "");
       const execution = session.activeAccessMode === "worktree-write"
         ? { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access" }
-        : { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only" };
+        : { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only", ...this.supervisorExecution(supervisorScope) };
       if (threadId) {
         // A failed resume must keep the saved association and message for retry.
-        await this.codex.request("thread/resume", { threadId, developerInstructions, ...execution }, this.guidance.get(messageId) ? 30_000 : undefined);
+        await runtime.request("thread/resume", { threadId, developerInstructions, ...execution }, this.guidance.get(messageId) ? 30_000 : undefined);
         assertCurrentStart();
       }
       assertDomain(!followup || threadId, "The existing conversation is unavailable; automatic retry disabled", "conversation_unavailable", 409);
       if (!threadId) {
-        const started = object(await this.codex.request("thread/start", {
+        const started = object(await runtime.request("thread/start", {
           cwd, ...execution, developerInstructions, ephemeral: false,
+          ...(supervisorScope ? { dynamicTools: SUPERVISOR_DYNAMIC_TOOLS } : {}),
         }, this.guidance.get(messageId) ? 30_000 : undefined));
         assertCurrentStart();
         threadId = String(object(started.thread).id ?? started.threadId ?? "");
@@ -1123,12 +1337,14 @@ export class AgentService {
         this.guidance.update(messageId, "pending", "Saved. Starting a turn to deliver guidance.", { phase: "start", threadId });
         guidanceStartSent = true;
       }
-      const startedTurn = object(await this.codex.request("turn/start", {
+      const startedTurn = object(await runtime.request("turn/start", {
         threadId,
         ...(this.guidance.get(messageId) ? { clientUserMessageId: messageId } : {}),
         input,
         approvalPolicy: "never",
-        sandboxPolicy: { type: session.activeAccessMode === "read-only" ? "readOnly" : "dangerFullAccess" },
+        sandboxPolicy: session.activeAccessMode === "read-only"
+          ? supervisorScope ? { type: "readOnly", networkAccess: false } : { type: "readOnly" }
+          : { type: "dangerFullAccess" },
         model: modelSettings.model,
         effort: modelSettings.effort,
       }, this.guidance.get(messageId) ? 30_000 : undefined));
@@ -1308,8 +1524,9 @@ export class AgentService {
     ownerId = this.canonicalOwnerId(ownerType, ownerId);
     const session = this.ensureSession(ownerType, ownerId);
     assertDomain(session.threadId && session.activeTurnId, "There is no active turn", "no_active_turn", 409);
-    await this.codex.initialize();
-    await this.codex.request("turn/interrupt", { threadId: session.threadId, turnId: session.activeTurnId });
+    const runtime = this.runtimeForOwner(ownerType, ownerId);
+    await runtime.initialize();
+    await runtime.request("turn/interrupt", { threadId: session.threadId, turnId: session.activeTurnId });
     const current = this.ensureSession(ownerType, ownerId);
     if (current.generation === session.generation && current.threadId === session.threadId && current.activeTurnId === session.activeTurnId) {
       this.updateSession(ownerType, ownerId, { runState: "interrupted", activeTurnId: null });
@@ -1334,7 +1551,7 @@ export class AgentService {
       const payload = object(JSON.parse(row.payload_json));
       result = { permissions: response.approved ? object(payload.permissions) : {}, scope: "turn" };
     } else result = { decision: response.approved ? "approved" : { denied: { rejection: "Denied by the user" } } };
-    this.codex.respond(rpcId, result);
+    this.runtimeForOwner(row.owner_type, row.owner_id).respond(rpcId, result);
     this.database.db.prepare("UPDATE pending_requests SET status = ?, resolved_at = ? WHERE id = ?")
       .run(row.request_type === "user_input" ? "answered" : response.approved ? "approved" : "denied", isoNow(), row.id);
     this.updateSession(row.owner_type, row.owner_id, { runState: "running" });
@@ -1369,7 +1586,15 @@ export class AgentService {
     return this.workspace("orchestrator", "main");
   }
 
-  close(): void { this.closed = true; if (this.observationTimer) clearTimeout(this.observationTimer); clearInterval(this.monitorTimer); clearInterval(this.scheduleTimer); clearInterval(this.resourceTimer); this.codex.close(); }
+  close(): void {
+    this.closed = true;
+    if (this.observationTimer) clearTimeout(this.observationTimer);
+    clearInterval(this.monitorTimer);
+    clearInterval(this.scheduleTimer);
+    clearInterval(this.resourceTimer);
+    this.codex.close();
+    this.supervisorCodex.close();
+  }
 
   private ensureSession(ownerType: SessionOwnerType, ownerId: string): AgentSession {
     ownerId = this.canonicalOwnerId(ownerType, ownerId);
@@ -1390,11 +1615,21 @@ export class AgentService {
     const member = ownerType === "orchestrator" ? this.team.memberForOwner(ownerId) : null;
     if (member) {
       const handoff = this.database.setting(`team_rollover:${ownerId}`);
-      return `You are ${member.name}, ${member.title}, a supervisory team member in Qahwa Tasks. Your instructions are: ${member.instructions}\n\nYou advise the user, the orchestrator, and task sessions. Never perform task work yourself, edit a project worktree, deploy, publish, or execute operational changes. Give analysis, feedback, and precise instructions that a task session can carry out. Manage your context economically. If context becomes inefficient, append <!-- qahwa-context-rollover:{"summary":"structured handoff for your next session"} -->.${handoff ? `\n\nPrevious context handoff: ${handoff}` : ""}\n\n${envelope}\n\nConversation input: ${userText}`;
+      const scope = this.team.supervisorScope(ownerId, userText);
+      return `You are ${member.name}, ${member.title}, a supervisory team member in Qahwa Tasks. Your instructions are: ${member.instructions}
+
+You advise the user, the orchestrator, and task sessions. Never perform task work yourself, edit a project worktree, deploy, publish, or execute operational changes. You do have safe read-only investigative tools: inspect source under the scoped project roots, review task outputs and artifacts, and use qahwa_evidence for approved live pages or images. Inspect accessible evidence directly instead of guessing or asking the user to ferry routine screenshots, code, logs, or task output. qahwa_evidence uses a fresh browser with no saved credentials. If required evidence needs authentication or a state change, say exactly what is missing and ask the orchestrator to delegate it. Project evidence scope: ${JSON.stringify(scope.projects)}.
+
+If the discussion creates execution work that a task session must perform, append <!-- qahwa-management:{"kind":"work|evidence|review","summary":"specific required outcome","projectId":"known project id","taskId":"known existing task id if applicable"} -->. This hidden request lets the orchestrator coordinate without the user repeating it. Do not emit it for work you can complete safely through read-only inspection. When reviewing returned task work, append <!-- qahwa-management-review:{"decision":"approved|changes_requested","feedback":"evidence-based review"} -->.
+
+Manage your context economically. If context becomes inefficient, append <!-- qahwa-context-rollover:{"summary":"structured handoff for your next session"} -->.${handoff ? `\n\nPrevious context handoff: ${handoff}` : ""}\n\n${envelope}\n\nConversation input: ${userText}`;
     }
     const meetingParticipant = ownerType === "orchestrator" ? this.team.participantForOwner(ownerId) : null;
     if (meetingParticipant) {
-      return `You are ${meetingParticipant.name}, ${meetingParticipant.title}, participating in a private Qahwa Tasks meeting context. Give supervisory analysis and feedback only. Never perform task work, mutate project files, deploy, publish, or operate external systems. This underlying context is hidden; your visible reply is copied only into the meeting transcript. Manage context economically.\n\n${envelope}\n\nConversation input: ${userText}`;
+      const scope = this.team.supervisorScope(ownerId, userText);
+      return `You are ${meetingParticipant.name}, ${meetingParticipant.title}, participating in a private Qahwa Tasks meeting context. Give supervisory analysis and feedback only. Never perform task work, mutate project files, deploy, publish, or operate external systems. You may independently inspect source, task results, approved live pages, and image evidence through the project-scoped read-only environment and qahwa_evidence tools. Inspect routine accessible evidence yourself; do not ask the user to assemble it. The browser is fresh and credential-free. Project evidence scope: ${JSON.stringify(scope.projects)}.
+
+This underlying context is hidden; your visible reply is copied only into the meeting transcript. If the discussion creates work or evidence gathering requiring a task session, append <!-- qahwa-management:{"kind":"work|evidence|review","summary":"specific required outcome","projectId":"known project id","taskId":"known existing task id if applicable"} --> so the orchestrator can coordinate it without repetition. Do not emit this when your read-only investigation is sufficient. When reviewing returned task work, append <!-- qahwa-management-review:{"decision":"approved|changes_requested","feedback":"evidence-based review"} -->. Manage context economically.\n\n${envelope}\n\nConversation input: ${userText}`;
     }
     if (ownerType === "orchestrator") {
       const capacity = this.capacity();
@@ -1412,11 +1647,12 @@ ${selectedTasks === undefined ? "This automated message has no user selection sn
 Saved unread task messages already carry the user's authorization for their own contents. You decide their processing order, accounting for priority, capacity and worktree conflicts. Use <!-- qahwa-actions:[{"type":"dispatch","messageIds":["saved message id","next saved message id"]}] --> to release those existing messages in your chosen order. Your own turn uses a slot; released messages start after your turn finishes, within capacity limits. This action needs no new authorization quote and cannot create messages or start unrelated work. Guidance messages expose a durable receipt in both chats: saved, pending, delivered (Codex accepted the input, not proof the work finished), or failed. Never infer delivery from a visible system note. Do not create another message to retry a failed guidance receipt. For a definitely rejected guidance message, dispatch its existing message id only when the current user explicitly requests retry, and include an exact current-user authorization quote in the dispatch action. Uncertain outcomes require inspection of the target conversation and cannot be dispatched automatically. Each chat's messages remain separate turns in arrival order. Pending orchestrator messages always get first access to available capacity. Do not treat pending task messages as instructions for your own turn.
 
 Team members: ${JSON.stringify(this.team.listMembers().map(({ id, name, title }) => ({ id, name, title })))}.
+Pending management loop: ${JSON.stringify(this.team.managementRequests(["pending", "delegated", "awaiting_review", "changes_requested"]))}.
 Authenticated internal meeting access: ${JSON.stringify(meetingAccess)}.
 Use this read-only meeting context only to answer the current user. Active meetings are listed by default; archived meetings appear only when the current request explicitly asks for archived or historical meetings. A resolved record contains the complete transcript and participant snapshots. For resolution "ambiguous", ask one concise clarification naming the candidates. For "none" or "not_found", state that concisely. Never ask which meeting when resolution is "resolved", and never expose or request device credentials.
 Application coordination interface: append a hidden JSON array only when coordination or team management is needed:
-<!-- qahwa-actions:[{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"consult","memberId":"member uuid","taskId":"ID-0001","message":"requested input","authorization":"exact quote"},{"type":"member_create","name":"unique name","title":"professional title","instructions":"role instructions","authorization":"exact quote"},{"type":"member_update","memberId":"member uuid","name":"optional","title":"optional","instructions":"optional","authorization":"exact quote"},{"type":"member_avatar","memberId":"member uuid","attachmentId":"uploaded attachment id","authorization":"exact quote"},{"type":"member_delete","memberId":"member uuid","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"},{"type":"directive","enabled":true,"instruction":"ongoing instruction","authorization":"exact quote"}] -->
-Starts may include "accessMode":"read-only" for explicitly read-only preparation, based on the full authorized scope, never titles alone. To change a task mode use {"type":"access","taskId":"ID-0001","accessMode":"worktree-write","authorization":"exact user quote explicitly authorizing shared-file edits"}. Access changes apply only to later turns and may wait for exclusive access. Include only the actions needed. Interpret the user's intent and scope yourself. On a user turn, authorization may come from the current or an earlier user message in this conversation; copy the smallest exact authorizing quote. On an automated observation, include the applicable standing directive's id and an exact quote from its sourceQuote. Respect later corrections and revocations. Keep your helpful, plain-language explanation alongside any actions; it remains visible in the conversation. Describe requested coordination as a next step, not as completed work. The application adds failures or queued outcomes when needed. Ordinary tool work should be described normally with verified results. ${envelope}
+<!-- qahwa-actions:[{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"consult","memberId":"member uuid","taskId":"ID-0001","message":"requested input","authorization":"exact quote"},{"type":"management_delegate","requestId":"request uuid","taskId":"ID-0001","message":"complete execution brief","authorization":"exact originating meeting user quote"},{"type":"management_create_task","requestId":"request uuid","projectId":"project uuid","title":"specific task title","description":"immutable execution brief","accessMode":"read-only|worktree-write","authorization":"exact originating meeting user quote"},{"type":"management_feedback","requestId":"request uuid","message":"specialist corrections","authorization":"exact originating meeting user quote"},{"type":"member_create","name":"unique name","title":"professional title","instructions":"role instructions","authorization":"exact quote"},{"type":"member_update","memberId":"member uuid","name":"optional","title":"optional","instructions":"optional","authorization":"exact quote"},{"type":"member_avatar","memberId":"member uuid","attachmentId":"uploaded attachment id","authorization":"exact quote"},{"type":"member_delete","memberId":"member uuid","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"},{"type":"directive","enabled":true,"instruction":"ongoing instruction","authorization":"exact quote"}] -->
+Starts may include "accessMode":"read-only" for explicitly read-only preparation, based on the full authorized scope, never titles alone. To change a task mode use {"type":"access","taskId":"ID-0001","accessMode":"worktree-write","authorization":"exact user quote explicitly authorizing shared-file edits"}. Access changes apply only to later turns and may wait for exclusive access. A pending management request inherits only the exact originating user meeting message; use that quote for management_delegate or management_feedback. Do not widen it. Returned task results must go back to the recorded requesting specialist for review; coordinate corrections until approved. Include only the actions needed. Interpret the user's intent and scope yourself. On a user turn, authorization may come from the current or an earlier user message in this conversation; copy the smallest exact authorizing quote. On an automated observation, include the applicable standing directive's id and an exact quote from its sourceQuote. Respect later corrections and revocations. Keep your helpful, plain-language explanation alongside any actions; it remains visible in the conversation. Describe requested coordination as a next step, not as completed work. The application adds failures or queued outcomes when needed. Ordinary tool work should be described normally with verified results. ${envelope}
 
 Conversation input: ${userText}`;
     }
@@ -1455,10 +1691,10 @@ Conversation input: ${userText}`;
   private baseDeveloperInstructions(ownerType: SessionOwnerType, ownerId: string, intakeState: TaskIntakeState, worktreeRoot?: string): string {
     const member = ownerType === "orchestrator" ? this.team.memberForOwner(ownerId) : null;
     if (member) {
-      return `You are ${member.name}, ${member.title}, a persistent supervisory team member in Qahwa Tasks. Follow these role instructions: ${member.instructions}. Never perform task work, mutate a worktree, deploy, publish, or operate external systems. Provide advice, review, and instructions for task sessions. Your sandbox is read-only by server policy.`;
+      return `You are ${member.name}, ${member.title}, a persistent supervisory team member in Qahwa Tasks. Follow these role instructions: ${member.instructions}. Never perform task work, mutate a worktree, deploy, publish, delete data, or operate external systems. Provide evidence-based advice, review, and instructions for task sessions. Your filesystem and network sandbox is read-only and network-blocked by server policy; only Qahwa's scoped evidence tools may render approved project URLs or images, without saved credentials.`;
     }
     const meetingParticipant = ownerType === "orchestrator" ? this.team.participantForOwner(ownerId) : null;
-    if (meetingParticipant) return `You are ${meetingParticipant.name}, ${meetingParticipant.title}, in a hidden meeting-only supervisory context. Never perform task work or mutate project files. Your sandbox is read-only and your replies are copied only to the meeting transcript.`;
+    if (meetingParticipant) return `You are ${meetingParticipant.name}, ${meetingParticipant.title}, in a hidden meeting-only supervisory context. Never perform task work, mutate project files, deploy, publish, delete data, or make external changes. Your filesystem and network sandbox is read-only and network-blocked; Qahwa's scoped evidence tools can inspect only approved project evidence with no saved browser credentials. Your replies are copied only to the meeting transcript.`;
     if (ownerType === "orchestrator") return `You are the portfolio orchestrator inside Qahwa Tasks. Coordinate work through task sessions and supervisory team members. Never perform task work or mutate project worktrees yourself. You may manage Qahwa task and team records and send authorized instructions. Your sandbox is read-only by server policy. Honor the user's scope and prior authorization. Distinguish direct user requests from automated observations; use <!-- qahwa-silent --> when an automated observation needs no response.\n\n${orchestratorPreferencesPrompt(this.database)}`;
     const task = this.tasks.getTask(ownerId);
     return intakeState === "pending"
@@ -1516,11 +1752,11 @@ Conversation input: ${userText}`;
     });
   }
 
-  private handleCodexMessage(message: JsonObject): void {
+  private handleCodexMessage(message: JsonObject, runtime: CodexAppServer): void {
     if (this.closed) return;
     if (message.method === "qahwa/codex-stopped") this.resources.reset();
     this.usage.handle(message);
-    if (this.taskTitles.handle(message)) return;
+    if (runtime === this.codex && this.taskTitles.handle(message)) return;
     const method = typeof message.method === "string" ? message.method : "";
     const params = object(message.params);
     const threadId = typeof params.threadId === "string" ? params.threadId : typeof object(params.thread).id === "string" ? String(object(params.thread).id) : null;
@@ -1545,11 +1781,15 @@ Conversation input: ${userText}`;
     if (method === "turn/completed" && turnId && this.database.db.prepare(
       "SELECT 1 FROM session_events WHERE owner_type=? AND owner_id=? AND turn_id=? AND event_type='turn/completed' LIMIT 1").get(owner.ownerType, owner.ownerId, turnId)) return;
     this.recordEvent(owner, method || "rpc.request", { threadId, turnId, payload: params });
+    if (message.id !== undefined && method === "item/tool/call") {
+      void this.handleSupervisorTool(runtime, owner, message.id as string | number, params);
+      return;
+    }
     if ((method === "item/started" || method === "item/completed") && object(params.item).type === "userMessage") {
       this.guidance.observe(threadId, turnId, object(params.item).clientId);
     }
     if (message.id !== undefined && method) {
-      this.storePending(owner, message.id as string | number, method, params);
+      this.storePending(owner, message.id as string | number, method, params, runtime);
       return;
     }
     if (method === "item/completed") {
@@ -1588,7 +1828,7 @@ Conversation input: ${userText}`;
           this.addMessage("orchestrator", owner.ownerId, "system", "New session started", { contextRollover: true, handoff: rollover });
         })();
         this.threadOwners.delete(previous.threadId);
-        void this.codex.request("thread/archive", { threadId: previous.threadId }).catch(() => undefined);
+        void runtime.request("thread/archive", { threadId: previous.threadId }).catch(() => undefined);
       }
       if (notifyIdle) void this.idleNotifier?.completed(owner.ownerId, threadId!, turnId!).catch(() => undefined);
       if (owner.ownerType === "task" && state === "failed") {
@@ -1664,8 +1904,26 @@ Conversation input: ${userText}`;
             speaker: { type: participant.type, id: participant.id, name: participant.name, title: participant.title, avatar: participant.avatar },
             teamDispatchId: sourceMetadata.teamDispatchId, originatingInteraction: sourceMessageId,
           });
+        } else if (responseTarget.type === "management_review" && typeof responseTarget.id === "string") {
+          const request = this.team.getManagementRequest(responseTarget.id);
+          copiedId = this.team.addMeetingMessage(request.meetingId, { speakerType: participant.type, speakerId: participant.id,
+            speakerName: participant.name, speakerTitle: participant.title }, body);
+          const decision = parsed.managementReview?.decision ?? "changes_requested";
+          this.team.saveManagementReview(request.id, decision, parsed.managementReview?.feedback ?? body);
+          this.orchestratorObservations.push(`${participant.name} ${decision === "approved" ? "approved" : "requested corrections to"} the task result for meeting request ${request.id}.`);
+          this.scheduleOrchestratorObservation();
         } else throw new Error("The response target is unavailable");
         this.team.completeDispatch(sourceMetadata.teamDispatchId, copiedId);
+        if (responseTarget.type === "meeting" && parsed.management && typeof responseTarget.id === "string") {
+          const source = this.database.db.prepare("SELECT source_message_id FROM team_dispatches WHERE id=?")
+            .get(sourceMetadata.teamDispatchId) as { source_message_id: string } | undefined;
+          if (source) {
+            const request = this.team.createManagementRequest({ meetingId: responseTarget.id, sourceMessageId: source.source_message_id,
+              requester: participant, ...parsed.management });
+            this.orchestratorObservations.push(`${participant.name} raised a meeting management request ${request.id}: ${request.summary}`);
+            this.scheduleOrchestratorObservation();
+          }
+        }
       } catch (error) { this.team.failDispatch(sourceMetadata.teamDispatchId, error instanceof Error ? error.message : String(error)); }
     }
     if (parsed.contextRollover && this.team.memberForOwner(owner.ownerId)) {
@@ -1717,6 +1975,8 @@ Conversation input: ${userText}`;
           summary: body.slice(0, 10_000),
         }, "codex");
       }
+      if (session.intakeState === "ready" && parsed.review) void this.queueManagementReviews(completedTask.id, body)
+        .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its requesting specialist: ${error instanceof Error ? error.message : String(error)}`));
       if (parsed.tone && ["green", "orange", "red"].includes(parsed.tone)) {
         const task = this.tasks.getTask(owner.ownerId);
         this.orchestratorObservations.push(`${task.humanId} (${task.projectName}) changed to ${parsed.tone}: ${parsed.message ?? "Status changed"}.`);
@@ -1771,7 +2031,12 @@ Conversation input: ${userText}`;
           outcomes.push({ status: "applied", message: "I updated the order of the saved messages." });
           continue;
         }
-        const currentlyAuthorized = hasCurrentUserAuthorization(authorizingConversation, action.authorization);
+        const managementRequest = action.type === "management_delegate" || action.type === "management_create_task" || action.type === "management_feedback"
+          ? this.team.getManagementRequest(action.requestId) : null;
+        const meetingAuthorization = managementRequest ? this.database.db.prepare(`SELECT body FROM meeting_messages
+          WHERE id=? AND meeting_id=? AND speaker_type='user'`).get(managementRequest.sourceMessageId, managementRequest.meetingId) as { body: string } | undefined : undefined;
+        const currentlyAuthorized = hasCurrentUserAuthorization(authorizingConversation, action.authorization)
+          || hasCurrentUserAuthorization(meetingAuthorization?.body, action.authorization);
         if (action.type === "directive") {
           if (!currentlyAuthorized) throw new Error("A standing directive must be authorized by the user in this conversation");
           if (action.enabled) {
@@ -1804,6 +2069,37 @@ Conversation input: ${userText}`;
           outcomes.push({ status: "applied", message: `${member.name} has been removed from the active team; historical messages are preserved.` });
         } else if (action.type === "consult") {
           outcomes.push(await this.consultMember(action.memberId, action.taskId, action.message, sourceMessageId));
+        } else if (action.type === "management_delegate") {
+          assertDomain(managementRequest?.status === "pending", "This management request is no longer pending", "management_request_state", 409);
+          const outcome = await this.messageTask(action.taskId,
+            `Meeting management request from ${managementRequest.requesterName} (${managementRequest.requesterTitle}): ${managementRequest.summary}\n\nOrchestrator brief: ${action.message}`,
+            sourceMessageId, `management:${managementRequest.id}:${managementRequest.reviewCount}`);
+          if (outcome.status !== "failed") this.team.delegateManagementRequest(managementRequest.id, action.taskId);
+          outcomes.push(outcome.status === "failed" ? outcome : { status: outcome.status,
+            message: `${this.coordinationTaskName(action.taskId)} is handling ${managementRequest.requesterName}'s meeting request; its result will return to them for review.` });
+        } else if (action.type === "management_create_task") {
+          assertDomain(managementRequest?.status === "pending", "This management request is no longer pending", "management_request_state", 409);
+          assertDomain(managementRequest.projectId === action.projectId, "The new task must stay in the request's project", "management_project_mismatch", 403);
+          const task = this.tasks.createTask({ projectId: action.projectId, title: action.title,
+            description: documentFromPlainText(`${action.description}\n\nMeeting request from ${managementRequest.requesterName} (${managementRequest.requesterTitle}): ${managementRequest.summary}`), status: "todo" }, "system");
+          if (action.accessMode === "read-only") {
+            const session = this.ensureSession("task", task.id);
+            this.requestTaskAccess(task.id, { mode: "read-only", expectedVersion: session.accessVersion });
+          }
+          this.team.delegateManagementRequest(managementRequest.id, task.id);
+          this.database.db.prepare(`INSERT INTO scheduler_queue(task_id,requested_by,reason,created_at) VALUES (?, 'orchestrator', ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at`)
+            .run(task.id, `Meeting management request ${managementRequest.id}`, isoNow());
+          requestedStarts.push(task.humanId);
+          outcomes.push({ status: "queued", message: `${task.humanId} was created for ${managementRequest.requesterName}'s meeting request and will return its result for specialist review.` });
+        } else if (action.type === "management_feedback") {
+          assertDomain(managementRequest?.status === "changes_requested" && managementRequest.taskId,
+            "This management request has no specialist corrections ready", "management_request_state", 409);
+          const outcome = await this.messageTask(managementRequest.taskId,
+            `Specialist review from ${managementRequest.requesterName} (${managementRequest.requesterTitle}): ${managementRequest.latestFeedback ?? action.message}\n\nOrchestrator correction brief: ${action.message}`,
+            sourceMessageId, `management-feedback:${managementRequest.id}:${managementRequest.reviewCount}`);
+          if (outcome.status !== "failed") this.team.delegateManagementRequest(managementRequest.id, managementRequest.taskId);
+          outcomes.push(outcome);
         } else if (action.type === "start") {
           const task = this.database.db.transaction(() => {
             const task = this.tasks.getTask(action.taskId);
@@ -1844,6 +2140,9 @@ Conversation input: ${userText}`;
           : action.type === "interrupt" ? `pause ${target}`
           : action.type === "priority" ? `change the task order for ${target}`
           : action.type === "consult" ? `ask the selected team member to advise ${target}`
+          : action.type === "management_delegate" ? `delegate the meeting request to ${target}`
+          : action.type === "management_create_task" ? "create a task for the meeting request"
+          : action.type === "management_feedback" ? "send the specialist review back to its task"
           : action.type.startsWith("member_") ? "manage that team member"
           : action.type === "directive" ? "change the standing instruction" : "reorder the saved messages";
         outcomes.push({ status: "failed", message: `I couldn't ${request}: ${error instanceof Error ? error.message : String(error)}` });
@@ -1863,7 +2162,7 @@ Conversation input: ${userText}`;
   }
 
   private async queueTeamPrompt(ownerId: string, participant: import("../domain/types.js").MeetingParticipant, prompt: string,
-    responseTarget: { type: "meeting" | "task"; id: string }, dispatchId: string): Promise<void> {
+    responseTarget: { type: "meeting" | "task" | "management_review"; id: string }, dispatchId: string): Promise<void> {
     const messageId = this.addMessage("orchestrator", ownerId, "system", prompt, {
       teamDispatchId: dispatchId, responseTarget, participantType: participant.type, participantId: participant.id,
       participantName: participant.name, participantTitle: participant.title, participantAvatar: participant.avatar,
@@ -1889,6 +2188,26 @@ Conversation input: ${userText}`;
       `You were invited to advise task ${task.humanId} · ${task.title}. The orchestrator asks: ${message}\n\nReply with named advice or instructions for the task session. Do not perform the task yourself.`,
       { type: "task", id: task.id }, dispatchId);
     return { status: "queued", message: `${member.name}'s input for ${this.coordinationTaskName(task.id)} is queued and will appear directly in the task conversation.` };
+  }
+
+  private async queueManagementReviews(taskId: string, resultBody: string): Promise<void> {
+    const task = this.tasks.getTask(taskId);
+    const requests = this.team.managementRequests(["delegated", "changes_requested"]).filter(request => request.taskId === task.id);
+    for (const request of requests) {
+      const participant = request.requesterType === "member"
+        ? this.team.participant(this.team.getMember(request.requesterId, true)) : this.team.orchestratorParticipant();
+      const output = task.outputs.at(-1);
+      const artifactSummary = output?.artifacts.map(artifact => ({ filename: artifact.filename, availability: artifact.availability,
+        source: artifact.source, previewUrl: artifact.previewUrl })) ?? [];
+      const sourceMessageId = this.team.addMeetingMessage(request.meetingId,
+        { speakerType: "system", speakerId: null, speakerName: "Qahwa", speakerTitle: "Management loop" },
+        `${task.humanId} returned results for ${request.requesterName}'s review.`);
+      const dispatchId = this.team.createDispatch(sourceMessageId, "meeting", request.meetingId, participant);
+      this.team.markManagementReviewQueued(request.id);
+      await this.queueTeamPrompt(meetingParticipantOwnerId(request.meetingId, participant), participant,
+        `Review task ${task.humanId} · ${task.title} against your meeting request: ${request.summary}\n\nTask result: ${resultBody}\nLatest structured output: ${JSON.stringify(output ? { summary: output.summary, validation: output.validation, limitations: output.limitations, artifacts: artifactSummary } : null)}\n\nInspect relevant project evidence directly when useful. Return an evidence-based verdict and append <!-- qahwa-management-review:{"decision":"approved|changes_requested","feedback":"specific review"} -->.`,
+        { type: "management_review", id: request.id }, dispatchId);
+    }
   }
 
   async sendMeetingMessage(meetingId: string, body: unknown): Promise<{ meeting: import("../domain/types.js").MeetingSummary; messages: import("../domain/types.js").MeetingMessage[] }> {
@@ -2093,17 +2412,21 @@ Conversation input: ${userText}`;
     return this.workspace("task", task.id);
   }
 
-  private storePending(owner: Owner, rpcId: string | number, method: string, params: JsonObject): void {
+  private storePending(owner: Owner, rpcId: string | number, method: string, params: JsonObject,
+    runtime: CodexAppServer = this.runtimeForOwner(owner.ownerType, owner.ownerId)): void {
     const requestType: PendingRequest["requestType"] = method.includes("commandExecution") ? "command"
       : method.includes("fileChange") ? "file_change"
         : method.includes("userInput") ? "user_input"
           : method.toLowerCase().includes("permission") ? "permissions" : "other";
-    if (owner.ownerType === "task" && requestType !== "user_input"
-      && this.ensureSession("task", owner.ownerId).activeAccessMode === "read-only") {
+    const protectedSupervisor = owner.ownerType === "orchestrator";
+    if ((protectedSupervisor && requestType !== "user_input") || (owner.ownerType === "task" && requestType !== "user_input"
+      && this.ensureSession("task", owner.ownerId).activeAccessMode === "read-only")) {
       // Fail closed even if Codex emits an unexpected approval request under never.
-      this.codex.respond(rpcId, requestType === "permissions" ? { permissions: {}, scope: "turn" }
-        : { decision: { denied: { rejection: "Read-only task: request exclusive editing access for a later turn" } } });
-      this.recordEvent(owner, "access.elevation_denied", { method });
+      runtime.respond(rpcId, requestType === "permissions" ? { permissions: {}, scope: "turn" }
+        : { decision: { denied: { rejection: protectedSupervisor
+          ? "Supervisory sessions cannot mutate files, elevate permissions, or perform external changes"
+          : "Read-only task: request exclusive editing access for a later turn" } } });
+      this.recordEvent(owner, protectedSupervisor ? "supervisor.mutation_denied" : "access.elevation_denied", { method });
       return;
     }
     this.database.db.prepare(`
