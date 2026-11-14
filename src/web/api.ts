@@ -1,5 +1,5 @@
 import type { ChatModelOption, ChatModelSelection } from "../domain/chat-model";
-import type { ChatAttachment, ChatReadState, Project, RichTextDocument, TaskDetail, TaskStatus, TaskSummary, TaskWorkspace, TerminalView, WorkspaceCursor, WorkspacePoll } from "../domain/types";
+import type { ChatAttachment, ChatReadState, MeetingMessage, MeetingParticipant, MeetingSummary, Project, RichTextDocument, TaskDetail, TaskStatus, TaskSummary, TaskWorkspace, TeamMember, TeamMemberSession, TerminalView, WorkspaceCursor, WorkspacePoll } from "../domain/types";
 import nacl from "tweetnacl";
 import type { OrchestratorSettings } from "../domain/orchestrator-settings";
 import type { UserAvatar } from "../domain/user-avatar";
@@ -402,6 +402,22 @@ async function fetchEncryptedAssetUncached(path: string): Promise<Blob> {
 }
 
 export const api = {
+  team: () => request<{ members: TeamMember[] }>("/api/team"),
+  teamParticipants: () => request<{ participants: MeetingParticipant[] }>("/api/team/participants"),
+  memberAvatarImage: (id: string) => fetchEncryptedAssetUncached(`/api/team/${encodeURIComponent(id)}/avatar/image`),
+  memberSessions: (id: string) => request<{ sessions: TeamMemberSession[] }>(`/api/team/${encodeURIComponent(id)}/sessions`),
+  createMemberSession: (id: string, title: string) => request<{ session: TeamMemberSession }>(`/api/team/${encodeURIComponent(id)}/sessions`, { method: "POST", body: JSON.stringify({ title }) }),
+  memberSessionWorkspace: (id: string, sessionId: string) => request<{ workspace: TaskWorkspace }>(`/api/team/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}/workspace`),
+  memberSessionMessages: (id: string, sessionId: string, query: import("../domain/types").MessagePageQuery = {}) => request<{ page: import("../domain/types").MessagePage }>(`/api/team/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}/messages?${new URLSearchParams({ ...query })}`),
+  sendMemberSessionMessage: (id: string, sessionId: string, message: string) => request<{ workspace: TaskWorkspace }>(`/api/team/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}/messages`, { method: "POST", body: JSON.stringify({ message }) }),
+  memberSessionUnread: (id: string, sessionId: string) => request<{ readState: ChatReadState; sessionState: import("../domain/types").SessionRunState }>(`/api/team/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}/unread`),
+  markMemberSessionRead: (id: string, sessionId: string, messageIds: string[]) => request<{ readState: ChatReadState }>(`/api/team/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}/read`, { method: "POST", body: JSON.stringify({ messageIds }) }),
+  interruptMemberSession: (id: string, sessionId: string) => request<{ workspace: TaskWorkspace }>(`/api/team/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionId)}/interrupt`, { method: "POST" }),
+  meetings: () => request<{ meetings: MeetingSummary[] }>("/api/meetings"),
+  createMeeting: (title: string, participantIds: string[]) => request<{ meeting: MeetingSummary }>("/api/meetings", { method: "POST", body: JSON.stringify({ title, participantIds }) }),
+  meeting: (id: string) => request<{ meeting: MeetingSummary; messages: MeetingMessage[] }>(`/api/meetings/${encodeURIComponent(id)}`),
+  archiveMeeting: (id: string) => request<{ meeting: MeetingSummary }>(`/api/meetings/${encodeURIComponent(id)}/archive`, { method: "POST" }),
+  sendMeetingMessage: (id: string, message: string) => request<{ meeting: MeetingSummary; messages: MeetingMessage[] }>(`/api/meetings/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify({ message }) }),
   createTerminal: (projectId: string, creationKey: string) => request<{ task: TaskDetail; terminal: TerminalView }>("/api/terminals", { method: "POST", body: JSON.stringify({ projectId, creationKey }) }),
   terminal: (id: string, generation?: string, cursor?: number, wait = false) => request<{ terminal: TerminalView }>(`/api/tasks/${encodeURIComponent(id)}/terminal?${new URLSearchParams({ ...(generation ? { generation } : {}), ...(cursor === undefined ? {} : { cursor: String(cursor) }), ...(wait ? { wait: "1" } : {}) })}`),
   terminalInput: (id: string, generation: string, inputId: string, data: string, binary = false, message?: string) => request<{ accepted: boolean }>(`/api/tasks/${encodeURIComponent(id)}/terminal/input`, { method: "POST", body: JSON.stringify({ generation, inputId, data, binary, message }) }),

@@ -10,6 +10,64 @@ export type SessionOwnerType = "task" | "orchestrator";
 export type TaskIntakeState = "pending" | "ready";
 export type TaskAccessMode = "read-only" | "worktree-write";
 
+export interface TeamMember {
+  id: string;
+  name: string;
+  title: string;
+  instructions: string;
+  avatar: import("./user-avatar.js").UserAvatar | null;
+  sessionState: SessionRunState;
+  unreadCount: number;
+  latestMessage: { preview: string; role: "user" | "assistant"; createdAt: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamMemberSession {
+  id: string;
+  memberId: string;
+  kind: "manual" | "task";
+  taskId: string | null;
+  taskHumanId: string | null;
+  taskTitle: string | null;
+  title: string;
+  sessionState: SessionRunState;
+  unreadCount: number;
+  latestMessage: { preview: string; role: "user" | "assistant"; createdAt: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MeetingParticipant {
+  type: "orchestrator" | "member";
+  id: string;
+  name: string;
+  title: string;
+  avatar: import("./user-avatar.js").UserAvatar | null;
+}
+
+export interface MeetingSummary {
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  participants: MeetingParticipant[];
+  latestMessage: MeetingMessage | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MeetingMessage {
+  id: string;
+  meetingId: string;
+  speakerType: "user" | "orchestrator" | "member" | "system";
+  speakerId: string | null;
+  speakerName: string;
+  speakerTitle: string;
+  body: string;
+  status?: "pending" | "delivered" | "failed";
+  createdAt: string;
+}
+
 export interface ChatAttachment {
   id: string;
   filename: string;

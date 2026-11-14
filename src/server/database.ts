@@ -462,6 +462,81 @@ CREATE TABLE IF NOT EXISTS pairing_grants (
   used_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS team_members (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  title TEXT NOT NULL,
+  instructions TEXT NOT NULL,
+  avatar_mime_type TEXT,
+  avatar_size INTEGER,
+  avatar_version TEXT,
+  avatar_data TEXT,
+  archived_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_member_sessions (
+  id TEXT PRIMARY KEY,
+  member_id TEXT NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN ('manual','task')),
+  task_id TEXT REFERENCES tasks(id),
+  title TEXT NOT NULL,
+  archived_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK((kind='task' AND task_id IS NOT NULL) OR (kind='manual' AND task_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_team_member_sessions_task
+  ON team_member_sessions(member_id, task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_team_member_sessions_member
+  ON team_member_sessions(member_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS meetings (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meeting_participants (
+  meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  participant_type TEXT NOT NULL CHECK(participant_type IN ('orchestrator','member')),
+  participant_id TEXT NOT NULL,
+  name_snapshot TEXT NOT NULL,
+  title_snapshot TEXT NOT NULL,
+  avatar_snapshot_json TEXT,
+  PRIMARY KEY(meeting_id, participant_type, participant_id)
+);
+
+CREATE TABLE IF NOT EXISTS meeting_messages (
+  id TEXT PRIMARY KEY,
+  meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  speaker_type TEXT NOT NULL CHECK(speaker_type IN ('user','orchestrator','member','system')),
+  speaker_id TEXT,
+  speaker_name TEXT NOT NULL,
+  speaker_title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_messages_meeting ON meeting_messages(meeting_id, created_at);
+
+CREATE TABLE IF NOT EXISTS team_dispatches (
+  id TEXT PRIMARY KEY,
+  source_message_id TEXT NOT NULL,
+  source_type TEXT NOT NULL CHECK(source_type IN ('meeting','task')),
+  source_id TEXT NOT NULL,
+  participant_type TEXT NOT NULL CHECK(participant_type IN ('orchestrator','member')),
+  participant_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered','failed')),
+  response_message_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_team_dispatches_source ON team_dispatches(source_type, source_id, created_at);
+
 `;
 
 export class AppDatabase {
