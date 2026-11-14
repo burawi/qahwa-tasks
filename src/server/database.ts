@@ -571,6 +571,35 @@ CREATE TABLE IF NOT EXISTS team_evidence_artifacts (
 CREATE INDEX IF NOT EXISTS idx_team_evidence_owner
   ON team_evidence_artifacts(owner_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS orchestrator_task_creations (
+  id TEXT PRIMARY KEY,
+  source_key TEXT NOT NULL,
+  action_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  authorization_text TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  reviewer_ids_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  UNIQUE(source_key, action_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_task_creations_task
+  ON orchestrator_task_creations(task_id);
+
+CREATE TABLE IF NOT EXISTS orchestrator_task_reviewers (
+  id TEXT PRIMARY KEY,
+  creation_id TEXT NOT NULL REFERENCES orchestrator_task_creations(id) ON DELETE CASCADE,
+  member_id TEXT NOT NULL REFERENCES team_members(id),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','awaiting_review','changes_requested','approved','failed')),
+  latest_feedback TEXT,
+  review_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(creation_id, member_id)
+);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_task_reviewers_status
+  ON orchestrator_task_reviewers(status, updated_at);
+
 `;
 
 export class AppDatabase {

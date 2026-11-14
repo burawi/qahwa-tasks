@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -63,12 +63,20 @@ type OrchestratorAction =
   | ({ type: "member_avatar"; memberId: string; attachmentId: string } & DirectedAction)
   | ({ type: "member_delete"; memberId: string } & DirectedAction)
   | ({ type: "consult"; memberId: string; taskId: string; message: string } & DirectedAction)
+  | ({ type: "create_task"; idempotencyKey: string; projectId: string; title: string; goal: string;
+    details: string[]; doneWhen: string[]; reviewerIds: string[]; accessMode: TaskAccessMode; startNow: boolean } & DirectedAction)
+  | ({ type: "task_review_feedback"; reviewId: string; message: string } & DirectedAction)
   | ({ type: "management_delegate"; requestId: string; taskId: string; message: string } & DirectedAction)
   | ({ type: "management_create_task"; requestId: string; projectId: string; title: string; description: string; accessMode: TaskAccessMode } & DirectedAction)
   | ({ type: "management_feedback"; requestId: string; message: string } & DirectedAction);
 
 type ManagementSignal = { kind: "evidence" | "work" | "review"; summary: string; projectId?: string; taskId?: string };
 type ReviewSignal = { decision: "approved" | "changes_requested"; feedback: string };
+
+type DirectTaskReviewRow = {
+  id: string; creation_id: string; member_id: string; status: "pending" | "awaiting_review" | "changes_requested" | "approved" | "failed";
+  latest_feedback: string | null; review_count: number; task_id: string; authorization_text: string;
+};
 
 type OrchestratorOutcome = { status: "applied" | "queued" | "failed"; message: string };
 
@@ -481,6 +489,19 @@ export function parseAgentEnvelope(text: string): {
         else if (type === "member_avatar" && typeof candidate.memberId === "string" && typeof candidate.attachmentId === "string") actions.push({ type, memberId: candidate.memberId, attachmentId: candidate.attachmentId, ...directed });
         else if (type === "consult" && typeof candidate.memberId === "string" && taskId && typeof candidate.message === "string") actions.push({
           type, memberId: candidate.memberId, taskId, message: candidate.message.trim().slice(0, 30_000), ...directed,
+        });
+        else if (type === "create_task" && typeof candidate.idempotencyKey === "string" && typeof candidate.projectId === "string"
+          && typeof candidate.title === "string" && typeof candidate.goal === "string"
+          && (candidate.accessMode === "read-only" || candidate.accessMode === "worktree-write")) actions.push({
+          type, idempotencyKey: candidate.idempotencyKey.trim().slice(0, 160), projectId: candidate.projectId,
+          title: candidate.title.trim().slice(0, 300), goal: candidate.goal.trim().slice(0, 20_000),
+          details: Array.isArray(candidate.details) ? candidate.details.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map(item => item.trim().slice(0, 5_000)).slice(0, 50) : [],
+          doneWhen: Array.isArray(candidate.doneWhen) ? candidate.doneWhen.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map(item => item.trim().slice(0, 5_000)).slice(0, 50) : [],
+          reviewerIds: Array.isArray(candidate.reviewerIds) ? [...new Set(candidate.reviewerIds.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map(item => item.trim()))].slice(0, 30) : [],
+          accessMode: candidate.accessMode, startNow: candidate.startNow === true, ...directed,
+        });
+        else if (type === "task_review_feedback" && typeof candidate.reviewId === "string" && typeof candidate.message === "string") actions.push({
+          type, reviewId: candidate.reviewId, message: candidate.message.trim().slice(0, 30_000), ...directed,
         });
         else if (type === "management_delegate" && typeof candidate.requestId === "string" && taskId && typeof candidate.message === "string") actions.push({
           type, requestId: candidate.requestId, taskId, message: candidate.message.trim().slice(0, 30_000), ...directed,
@@ -1648,11 +1669,12 @@ Saved unread task messages already carry the user's authorization for their own 
 
 Team members: ${JSON.stringify(this.team.listMembers().map(({ id, name, title }) => ({ id, name, title })))}.
 Pending management loop: ${JSON.stringify(this.team.managementRequests(["pending", "delegated", "awaiting_review", "changes_requested"]))}.
+Direct-request specialist reviews: ${JSON.stringify(this.directTaskReviewSnapshot())}.
 Authenticated internal meeting access: ${JSON.stringify(meetingAccess)}.
 Use this read-only meeting context only to answer the current user. Active meetings are listed by default; archived meetings appear only when the current request explicitly asks for archived or historical meetings. A resolved record contains the complete transcript and participant snapshots. For resolution "ambiguous", ask one concise clarification naming the candidates. For "none" or "not_found", state that concisely. Never ask which meeting when resolution is "resolved", and never expose or request device credentials.
 Application coordination interface: append a hidden JSON array only when coordination or team management is needed:
-<!-- qahwa-actions:[{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"consult","memberId":"member uuid","taskId":"ID-0001","message":"requested input","authorization":"exact quote"},{"type":"management_delegate","requestId":"request uuid","taskId":"ID-0001","message":"complete execution brief","authorization":"exact originating meeting user quote"},{"type":"management_create_task","requestId":"request uuid","projectId":"project uuid","title":"specific task title","description":"immutable execution brief","accessMode":"read-only|worktree-write","authorization":"exact originating meeting user quote"},{"type":"management_feedback","requestId":"request uuid","message":"specialist corrections","authorization":"exact originating meeting user quote"},{"type":"member_create","name":"unique name","title":"professional title","instructions":"role instructions","authorization":"exact quote"},{"type":"member_update","memberId":"member uuid","name":"optional","title":"optional","instructions":"optional","authorization":"exact quote"},{"type":"member_avatar","memberId":"member uuid","attachmentId":"uploaded attachment id","authorization":"exact quote"},{"type":"member_delete","memberId":"member uuid","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"},{"type":"directive","enabled":true,"instruction":"ongoing instruction","authorization":"exact quote"}] -->
-Starts may include "accessMode":"read-only" for explicitly read-only preparation, based on the full authorized scope, never titles alone. To change a task mode use {"type":"access","taskId":"ID-0001","accessMode":"worktree-write","authorization":"exact user quote explicitly authorizing shared-file edits"}. Access changes apply only to later turns and may wait for exclusive access. A pending management request inherits only the exact originating user meeting message; use that quote for management_delegate or management_feedback. Do not widen it. Returned task results must go back to the recorded requesting specialist for review; coordinate corrections until approved. Include only the actions needed. Interpret the user's intent and scope yourself. On a user turn, authorization may come from the current or an earlier user message in this conversation; copy the smallest exact authorizing quote. On an automated observation, include the applicable standing directive's id and an exact quote from its sourceQuote. Respect later corrections and revocations. Keep your helpful, plain-language explanation alongside any actions; it remains visible in the conversation. Describe requested coordination as a next step, not as completed work. The application adds failures or queued outcomes when needed. Ordinary tool work should be described normally with verified results. ${envelope}
+<!-- qahwa-actions:[{"type":"create_task","idempotencyKey":"stable short key for this requested task","projectId":"project uuid","title":"specific task title","goal":"complete goal","details":["scope or constraint"],"doneWhen":["verifiable acceptance criterion"],"reviewerIds":["member uuid"],"accessMode":"read-only|worktree-write","startNow":true,"authorization":"exact current user quote","directiveId":"standing directive id when used"},{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"consult","memberId":"member uuid","taskId":"ID-0001","message":"requested input","authorization":"exact quote"},{"type":"task_review_feedback","reviewId":"review uuid","message":"specialist corrections","authorization":"exact original user quote"},{"type":"management_delegate","requestId":"request uuid","taskId":"ID-0001","message":"complete execution brief","authorization":"exact originating meeting user quote"},{"type":"management_create_task","requestId":"request uuid","projectId":"project uuid","title":"specific task title","description":"immutable execution brief","accessMode":"read-only|worktree-write","authorization":"exact originating meeting user quote"},{"type":"management_feedback","requestId":"request uuid","message":"specialist corrections","authorization":"exact originating meeting user quote"},{"type":"member_create","name":"unique name","title":"professional title","instructions":"role instructions","authorization":"exact quote"},{"type":"member_update","memberId":"member uuid","name":"optional","title":"optional","instructions":"optional","authorization":"exact quote"},{"type":"member_avatar","memberId":"member uuid","attachmentId":"uploaded attachment id","authorization":"exact quote"},{"type":"member_delete","memberId":"member uuid","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"},{"type":"directive","enabled":true,"instruction":"ongoing instruction","authorization":"exact quote"}] -->
+Use create_task for a direct user request to create new execution work; never call qahwa_tasks.create_tasks from this supervisory session. Its idempotencyKey must be stable across retries. Supply the structured goal, details, doneWhen, requested access mode, specialist reviewer IDs, and startNow when immediate intake is requested. Task creation accepts only an exact quote from the current user message or the applicable standing directive—not titles, selections, summaries, member messages, or older unrelated conversation. Starts may include "accessMode":"read-only" for explicitly read-only preparation, based on the full authorized scope, never titles alone. To change a task mode use {"type":"access","taskId":"ID-0001","accessMode":"worktree-write","authorization":"exact user quote explicitly authorizing shared-file edits"}. Access changes apply only to later turns and may wait for exclusive access. A pending management request inherits only the exact originating user meeting message; use that quote for management_delegate or management_feedback. Do not widen it. Returned task results must go back to the recorded requesting specialist for review; coordinate corrections until approved. Include only the actions needed. Interpret the user's intent and scope yourself. On a user turn, authorization for actions other than create_task may come from the current or an earlier user message in this conversation; copy the smallest exact authorizing quote. On an automated observation, include the applicable standing directive's id and an exact quote from its sourceQuote. Respect later corrections and revocations. Keep your helpful, plain-language explanation alongside any actions; it remains visible in the conversation. Describe requested coordination as a next step, not as completed work. The application adds failures or queued outcomes when needed. Ordinary tool work should be described normally with verified results. ${envelope}
 
 Conversation input: ${userText}`;
     }
@@ -1912,6 +1934,20 @@ Conversation input: ${userText}`;
           this.team.saveManagementReview(request.id, decision, parsed.managementReview?.feedback ?? body);
           this.orchestratorObservations.push(`${participant.name} ${decision === "approved" ? "approved" : "requested corrections to"} the task result for meeting request ${request.id}.`);
           this.scheduleOrchestratorObservation();
+        } else if (responseTarget.type === "direct_review" && typeof responseTarget.id === "string") {
+          const review = this.directTaskReview(responseTarget.id);
+          copiedId = this.addMessage("task", review.task_id, "assistant", body, {
+            speaker: { type: participant.type, id: participant.id, name: participant.name, title: participant.title, avatar: participant.avatar },
+            teamDispatchId: sourceMetadata.teamDispatchId, specialistReview: review.id,
+          });
+          const decision = parsed.managementReview?.decision ?? "changes_requested";
+          const feedback = parsed.managementReview?.feedback ?? body;
+          const changed = this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status=?,latest_feedback=?,
+            review_count=review_count+1,updated_at=? WHERE id=? AND status='awaiting_review'`)
+            .run(decision, feedback.slice(0, 20_000), isoNow(), review.id).changes;
+          assertDomain(changed === 1, "Specialist review is no longer awaiting a response", "task_review_state", 409);
+          this.orchestratorObservations.push(`${participant.name} ${decision === "approved" ? "approved" : "requested corrections to"} ${this.coordinationTaskName(review.task_id)}.`);
+          this.scheduleOrchestratorObservation();
         } else throw new Error("The response target is unavailable");
         this.team.completeDispatch(sourceMetadata.teamDispatchId, copiedId);
         if (responseTarget.type === "meeting" && parsed.management && typeof responseTarget.id === "string") {
@@ -1975,8 +2011,12 @@ Conversation input: ${userText}`;
           summary: body.slice(0, 10_000),
         }, "codex");
       }
-      if (session.intakeState === "ready" && parsed.review) void this.queueManagementReviews(completedTask.id, body)
-        .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its requesting specialist: ${error instanceof Error ? error.message : String(error)}`));
+      if (session.intakeState === "ready" && parsed.review) {
+        void this.queueManagementReviews(completedTask.id, body)
+          .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its meeting specialist: ${error instanceof Error ? error.message : String(error)}`));
+        void this.queueDirectTaskReviews(completedTask.id, body)
+          .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its direct-request specialists: ${error instanceof Error ? error.message : String(error)}`));
+      }
       if (parsed.tone && ["green", "orange", "red"].includes(parsed.tone)) {
         const task = this.tasks.getTask(owner.ownerId);
         this.orchestratorObservations.push(`${task.humanId} (${task.projectName}) changed to ${parsed.tone}: ${parsed.message ?? "Status changed"}.`);
@@ -1993,12 +2033,79 @@ Conversation input: ${userText}`;
         if (messageId) this.database.db.prepare("UPDATE chat_messages SET body = ? WHERE id = ?").run(reply, messageId);
         else this.addMessage("orchestrator", "main", "assistant", reply, null, itemId);
       };
-      void this.applyOrchestratorActions(parsed.actions, authorizingUserMessage, messageId, itemId)
+      void this.applyOrchestratorActions(parsed.actions, authorizingUserMessage, messageId, itemId, sourceMessageId ?? null)
         .then(report, (error) => report([{ status: "failed", message: `I couldn't finish coordinating the requested work: ${error instanceof Error ? error.message : String(error)}` }]));
     }
   }
 
-  private async applyOrchestratorActions(actions: OrchestratorAction[], authorizingUserMessage?: string, sourceMessageId: string | null = null, sourceItemId: string = randomUUID()): Promise<OrchestratorOutcome[]> {
+  private createCoordinatedTask(input: {
+    sourceKey: string; actionKey: string; authorizationText: string; projectId: string; title: string; goal: string;
+    details: string[]; doneWhen: string[]; reviewerIds: string[]; accessMode: TaskAccessMode; startNow: boolean;
+  }): { task: ReturnType<TaskService["getTask"]>; duplicate: boolean } {
+    assertDomain(input.sourceKey.length > 0 && input.actionKey.trim().length > 0, "Task creation needs a stable idempotency key", "invalid_task_creation_key");
+    assertDomain(input.title.trim().length > 0 && input.goal.trim().length > 0, "Task title and goal are required", "invalid_task_creation");
+    const normalized = { projectId: input.projectId, title: input.title.trim(), goal: input.goal.trim(), details: input.details,
+      doneWhen: input.doneWhen, reviewerIds: [...new Set(input.reviewerIds)].sort(), accessMode: input.accessMode, startNow: input.startNow };
+    const requestHash = createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+    const existing = this.database.db.prepare(`SELECT task_id,request_hash FROM orchestrator_task_creations
+      WHERE source_key=? AND action_key=?`).get(input.sourceKey, input.actionKey.trim()) as { task_id: string; request_hash: string } | undefined;
+    if (existing) {
+      assertDomain(existing.request_hash === requestHash, "That task-creation key was already used for different work", "task_creation_conflict", 409);
+      return { task: this.tasks.getTask(existing.task_id), duplicate: true };
+    }
+    const reviewers = normalized.reviewerIds.map(id => this.team.getMember(id));
+    const description = [
+      `Goal:\n${normalized.goal}`,
+      normalized.details.length ? `Details:\n${normalized.details.map(item => `- ${item}`).join("\n")}` : "",
+      normalized.doneWhen.length ? `Done when:\n${normalized.doneWhen.map(item => `- ${item}`).join("\n")}` : "",
+      reviewers.length ? `Specialist review:\n${reviewers.map(member => `- ${member.name}, ${member.title}`).join("\n")}` : "",
+    ].filter(Boolean).join("\n\n");
+    return this.database.db.transaction(() => {
+      const raced = this.database.db.prepare(`SELECT task_id,request_hash FROM orchestrator_task_creations
+        WHERE source_key=? AND action_key=?`).get(input.sourceKey, input.actionKey.trim()) as { task_id: string; request_hash: string } | undefined;
+      if (raced) {
+        assertDomain(raced.request_hash === requestHash, "That task-creation key was already used for different work", "task_creation_conflict", 409);
+        return { task: this.tasks.getTask(raced.task_id), duplicate: true };
+      }
+      const task = this.tasks.createTask({ projectId: normalized.projectId, title: normalized.title,
+        description: documentFromPlainText(description), status: "todo" }, "system");
+      if (normalized.accessMode === "read-only") {
+        const session = this.ensureSession("task", task.id);
+        this.requestTaskAccess(task.id, { mode: "read-only", expectedVersion: session.accessVersion });
+      }
+      const creationId = randomUUID(); const timestamp = isoNow();
+      this.database.db.prepare(`INSERT INTO orchestrator_task_creations
+        (id,source_key,action_key,request_hash,authorization_text,project_id,task_id,reviewer_ids_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(creationId, input.sourceKey, input.actionKey.trim(), requestHash, input.authorizationText,
+          normalized.projectId, task.id, JSON.stringify(normalized.reviewerIds), timestamp);
+      const insertReviewer = this.database.db.prepare(`INSERT INTO orchestrator_task_reviewers
+        (id,creation_id,member_id,created_at,updated_at) VALUES (?,?,?,?,?)`);
+      for (const reviewer of reviewers) insertReviewer.run(randomUUID(), creationId, reviewer.id, timestamp, timestamp);
+      if (normalized.startNow) this.database.db.prepare(`INSERT INTO scheduler_queue(task_id,requested_by,reason,created_at)
+        VALUES (?, 'orchestrator', ?, ?) ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at`)
+        .run(task.id, `Direct orchestrator task creation ${creationId}`, timestamp);
+      return { task, duplicate: false };
+    }).immediate();
+  }
+
+  private directTaskReview(id: string): DirectTaskReviewRow {
+    const row = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text FROM orchestrator_task_reviewers r
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id WHERE r.id=?`).get(id) as DirectTaskReviewRow | undefined;
+    assertDomain(row, "Specialist task review not found", "task_review_not_found", 404);
+    return row;
+  }
+
+  private directTaskReviewSnapshot(): unknown[] {
+    return this.database.db.prepare(`SELECT r.id,r.status,r.latest_feedback AS latestFeedback,r.review_count AS reviewCount,
+      t.human_id AS taskId,t.title,m.name AS reviewerName,m.title AS reviewerTitle
+      FROM orchestrator_task_reviewers r JOIN orchestrator_task_creations c ON c.id=r.creation_id
+      JOIN tasks t ON t.id=c.task_id JOIN team_members m ON m.id=r.member_id
+      WHERE r.status IN ('pending','awaiting_review','changes_requested') ORDER BY r.updated_at`)
+      .all() as unknown[];
+  }
+
+  private async applyOrchestratorActions(actions: OrchestratorAction[], authorizingUserMessage?: string, sourceMessageId: string | null = null,
+    sourceItemId: string = randomUUID(), authorizationMessageId: string | null = null): Promise<OrchestratorOutcome[]> {
     const outcomes: OrchestratorOutcome[] = [];
     const requestedStarts: string[] = [];
     const authorizingConversation = authorizingUserMessage === undefined ? undefined : [
@@ -2033,10 +2140,12 @@ Conversation input: ${userText}`;
         }
         const managementRequest = action.type === "management_delegate" || action.type === "management_create_task" || action.type === "management_feedback"
           ? this.team.getManagementRequest(action.requestId) : null;
+        const directReview = action.type === "task_review_feedback" ? this.directTaskReview(action.reviewId) : null;
         const meetingAuthorization = managementRequest ? this.database.db.prepare(`SELECT body FROM meeting_messages
           WHERE id=? AND meeting_id=? AND speaker_type='user'`).get(managementRequest.sourceMessageId, managementRequest.meetingId) as { body: string } | undefined : undefined;
         const currentlyAuthorized = hasCurrentUserAuthorization(authorizingConversation, action.authorization)
-          || hasCurrentUserAuthorization(meetingAuthorization?.body, action.authorization);
+          || hasCurrentUserAuthorization(meetingAuthorization?.body, action.authorization)
+          || hasCurrentUserAuthorization(directReview?.authorization_text, action.authorization);
         if (action.type === "directive") {
           if (!currentlyAuthorized) throw new Error("A standing directive must be authorized by the user in this conversation");
           if (action.enabled) {
@@ -2051,7 +2160,13 @@ Conversation input: ${userText}`;
           }
           continue;
         }
-        if (!currentlyAuthorized && !hasStandingDirectiveAuthorization(directive, action.directiveId, action.authorization)) {
+        const standingAuthorized = hasStandingDirectiveAuthorization(directive, action.directiveId, action.authorization);
+        if (action.type === "create_task") {
+          assertDomain(hasCurrentUserAuthorization(authorizingUserMessage, action.authorization) || standingAuthorized,
+            "Creating a task needs an exact quote from the current user request or the applicable standing directive", "task_creation_authorization", 403);
+          assertDomain((hasCurrentUserAuthorization(authorizingUserMessage, action.authorization) && authorizationMessageId) || (standingAuthorized && directive),
+            "Task creation authorization source is unavailable", "task_creation_authorization", 403);
+        } else if (!currentlyAuthorized && !standingAuthorized) {
           throw new Error("The action was not authorized by the user conversation or the active standing directive");
         }
         if (action.type === "member_create") {
@@ -2069,6 +2184,25 @@ Conversation input: ${userText}`;
           outcomes.push({ status: "applied", message: `${member.name} has been removed from the active team; historical messages are preserved.` });
         } else if (action.type === "consult") {
           outcomes.push(await this.consultMember(action.memberId, action.taskId, action.message, sourceMessageId));
+        } else if (action.type === "create_task") {
+          const currentUserAuthorized = hasCurrentUserAuthorization(authorizingUserMessage, action.authorization);
+          const sourceKey = currentUserAuthorized ? `user:${authorizationMessageId}` : `directive:${directive!.id}`;
+          const created = this.createCoordinatedTask({ sourceKey, actionKey: action.idempotencyKey,
+            authorizationText: currentUserAuthorized ? authorizingUserMessage! : directive!.sourceQuote,
+            projectId: action.projectId, title: action.title, goal: action.goal, details: action.details, doneWhen: action.doneWhen,
+            reviewerIds: action.reviewerIds, accessMode: action.accessMode, startNow: action.startNow });
+          if (action.startNow) requestedStarts.push(created.task.humanId);
+          outcomes.push({ status: action.startNow ? "queued" : "applied", message: created.duplicate
+            ? `${this.coordinationTaskName(created.task.id)} already exists for this request; no duplicate was created.`
+            : `${created.task.humanId} was created${action.startNow ? " and queued for mandatory intake" : ""}.` });
+        } else if (action.type === "task_review_feedback") {
+          assertDomain(directReview?.status === "changes_requested", "This specialist review has no corrections ready", "task_review_state", 409);
+          const outcome = await this.messageTask(directReview.task_id,
+            `Specialist review corrections: ${directReview.latest_feedback ?? action.message}\n\nOrchestrator correction brief: ${action.message}`,
+            sourceMessageId, `direct-review-feedback:${directReview.id}:${directReview.review_count}`);
+          if (outcome.status !== "failed") this.database.db.prepare(`UPDATE orchestrator_task_reviewers
+            SET status='pending',updated_at=? WHERE id=? AND status='changes_requested'`).run(isoNow(), directReview.id);
+          outcomes.push(outcome);
         } else if (action.type === "management_delegate") {
           assertDomain(managementRequest?.status === "pending", "This management request is no longer pending", "management_request_state", 409);
           const outcome = await this.messageTask(action.taskId,
@@ -2078,20 +2212,17 @@ Conversation input: ${userText}`;
           outcomes.push(outcome.status === "failed" ? outcome : { status: outcome.status,
             message: `${this.coordinationTaskName(action.taskId)} is handling ${managementRequest.requesterName}'s meeting request; its result will return to them for review.` });
         } else if (action.type === "management_create_task") {
-          assertDomain(managementRequest?.status === "pending", "This management request is no longer pending", "management_request_state", 409);
+          assertDomain(managementRequest && ["pending", "delegated"].includes(managementRequest.status), "This management request is no longer available", "management_request_state", 409);
           assertDomain(managementRequest.projectId === action.projectId, "The new task must stay in the request's project", "management_project_mismatch", 403);
-          const task = this.tasks.createTask({ projectId: action.projectId, title: action.title,
-            description: documentFromPlainText(`${action.description}\n\nMeeting request from ${managementRequest.requesterName} (${managementRequest.requesterTitle}): ${managementRequest.summary}`), status: "todo" }, "system");
-          if (action.accessMode === "read-only") {
-            const session = this.ensureSession("task", task.id);
-            this.requestTaskAccess(task.id, { mode: "read-only", expectedVersion: session.accessVersion });
-          }
-          this.team.delegateManagementRequest(managementRequest.id, task.id);
-          this.database.db.prepare(`INSERT INTO scheduler_queue(task_id,requested_by,reason,created_at) VALUES (?, 'orchestrator', ?, ?)
-            ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at`)
-            .run(task.id, `Meeting management request ${managementRequest.id}`, isoNow());
-          requestedStarts.push(task.humanId);
-          outcomes.push({ status: "queued", message: `${task.humanId} was created for ${managementRequest.requesterName}'s meeting request and will return its result for specialist review.` });
+          const created = this.createCoordinatedTask({ sourceKey: `meeting:${managementRequest.sourceMessageId}`,
+            actionKey: `management:${managementRequest.id}`, authorizationText: meetingAuthorization!.body,
+            projectId: action.projectId, title: action.title,
+            goal: `${action.description}\n\nMeeting request from ${managementRequest.requesterName} (${managementRequest.requesterTitle}): ${managementRequest.summary}`,
+            details: [], doneWhen: [], reviewerIds: [], accessMode: action.accessMode, startNow: true });
+          if (managementRequest.status === "pending") this.team.delegateManagementRequest(managementRequest.id, created.task.id);
+          else assertDomain(managementRequest.taskId === created.task.id, "Meeting request is linked to a different task", "management_request_state", 409);
+          requestedStarts.push(created.task.humanId);
+          outcomes.push({ status: "queued", message: `${created.task.humanId} ${created.duplicate ? "remains assigned" : "was created"} for ${managementRequest.requesterName}'s meeting request and will return its result for specialist review.` });
         } else if (action.type === "management_feedback") {
           assertDomain(managementRequest?.status === "changes_requested" && managementRequest.taskId,
             "This management request has no specialist corrections ready", "management_request_state", 409);
@@ -2140,6 +2271,8 @@ Conversation input: ${userText}`;
           : action.type === "interrupt" ? `pause ${target}`
           : action.type === "priority" ? `change the task order for ${target}`
           : action.type === "consult" ? `ask the selected team member to advise ${target}`
+          : action.type === "create_task" ? "create the requested task"
+          : action.type === "task_review_feedback" ? "send the specialist review back to its task"
           : action.type === "management_delegate" ? `delegate the meeting request to ${target}`
           : action.type === "management_create_task" ? "create a task for the meeting request"
           : action.type === "management_feedback" ? "send the specialist review back to its task"
@@ -2162,7 +2295,7 @@ Conversation input: ${userText}`;
   }
 
   private async queueTeamPrompt(ownerId: string, participant: import("../domain/types.js").MeetingParticipant, prompt: string,
-    responseTarget: { type: "meeting" | "task" | "management_review"; id: string }, dispatchId: string): Promise<void> {
+    responseTarget: { type: "meeting" | "task" | "management_review" | "direct_review"; id: string }, dispatchId: string): Promise<void> {
     const messageId = this.addMessage("orchestrator", ownerId, "system", prompt, {
       teamDispatchId: dispatchId, responseTarget, participantType: participant.type, participantId: participant.id,
       participantName: participant.name, participantTitle: participant.title, participantAvatar: participant.avatar,
@@ -2207,6 +2340,38 @@ Conversation input: ${userText}`;
       await this.queueTeamPrompt(meetingParticipantOwnerId(request.meetingId, participant), participant,
         `Review task ${task.humanId} · ${task.title} against your meeting request: ${request.summary}\n\nTask result: ${resultBody}\nLatest structured output: ${JSON.stringify(output ? { summary: output.summary, validation: output.validation, limitations: output.limitations, artifacts: artifactSummary } : null)}\n\nInspect relevant project evidence directly when useful. Return an evidence-based verdict and append <!-- qahwa-management-review:{"decision":"approved|changes_requested","feedback":"specific review"} -->.`,
         { type: "management_review", id: request.id }, dispatchId);
+    }
+  }
+
+  private async queueDirectTaskReviews(taskId: string, resultBody: string): Promise<void> {
+    const task = this.tasks.getTask(taskId);
+    const reviews = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text FROM orchestrator_task_reviewers r
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id WHERE c.task_id=? AND r.status='pending' ORDER BY r.created_at`)
+      .all(task.id) as DirectTaskReviewRow[];
+    for (const review of reviews) {
+      const member = this.team.getMember(review.member_id);
+      const participant = this.team.participant(member);
+      const output = task.outputs.at(-1);
+      const artifacts = output?.artifacts.map(artifact => ({ filename: artifact.filename, availability: artifact.availability,
+        source: artifact.source, previewUrl: artifact.previewUrl })) ?? [];
+      const traceId = this.addMessage("task", task.id, "system", `${member.name} (${member.title}) is reviewing this result.`, {
+        specialistReview: review.id, memberId: member.id,
+      });
+      const dispatchId = this.team.createDispatch(traceId, "task", task.id, participant);
+      try {
+        const changed = this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='awaiting_review',updated_at=?
+          WHERE id=? AND status='pending'`).run(isoNow(), review.id).changes;
+        if (changed !== 1) continue;
+        const memberSession = this.team.ensureTaskSession(member.id, task.id);
+        await this.queueTeamPrompt(memberSessionOwnerId(memberSession.id), participant,
+          `Review task ${task.humanId} · ${task.title} against its structured goal and done-when criteria.\n\nTask result: ${resultBody}\nLatest structured output: ${JSON.stringify(output ? { summary: output.summary, validation: output.validation, limitations: output.limitations, artifacts } : null)}\n\nInspect relevant project evidence directly when useful. Return an evidence-based verdict and append <!-- qahwa-management-review:{"decision":"approved|changes_requested","feedback":"specific review"} -->.`,
+          { type: "direct_review", id: review.id }, dispatchId);
+      } catch (error) {
+        this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='failed',latest_feedback=?,updated_at=? WHERE id=?`)
+          .run((error instanceof Error ? error.message : String(error)).slice(0, 10_000), isoNow(), review.id);
+        this.team.failDispatch(dispatchId, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
     }
   }
 

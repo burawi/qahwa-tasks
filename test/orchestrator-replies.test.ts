@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { coordinationFixture, until } from "./helpers/orchestrator-replies.js";
 import { workspacePoll } from "../src/server/workspace-poll.js";
+import { plainTextFromDocument } from "../src/domain/types.js";
 
 const envelope = (body: string, actions: unknown[], silent = false) => `${body}\n<!-- qahwa-actions:${JSON.stringify(actions)} -->${silent ? "\n<!-- qahwa-silent -->" : ""}`;
 const explanation = "The canvas failed because its document could not be loaded. I'll send the preview task the details so it can investigate.";
@@ -144,4 +145,108 @@ test("ordinary replies without actions and silent replies keep their existing be
       assert.deepEqual(f.assistants().map(({ body }) => body), silent ? [] : ["Here is what caused the preview to fail."]);
     } finally { f.close(); }
   }
+});
+
+test("direct orchestrator task creation is internal, structured, scoped, read-only, and starts mandatory intake", async () => {
+  const f = coordinationFixture();
+  try {
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const reviewer = f.agents.team.createMember({ name: "Jamil", title: "Product Designer", instructions: "Review UX evidence." });
+    const userRequest = "Create and start a read-only Wassala admin UX audit";
+    await f.reply(envelope("I’ll create the audit task and start its intake.", [{
+      type: "create_task", idempotencyKey: "wassala-admin-ux-audit", projectId: project.id,
+      title: "Audit Wassala Admin UX", goal: "Inspect the production UX from evidence",
+      details: ["Capture mobile and desktop evidence", "Preserve operational behavior"],
+      doneWhen: ["Jamil reviews the findings"], reviewerIds: [reviewer.id], accessMode: "read-only", startNow: true,
+      authorization: userRequest,
+    }]), userRequest);
+    await until(() => f.tasks.listTasks({ tab: "all" }).length === 1, "Direct task was not created");
+    const task = f.tasks.listTasks({ tab: "all" })[0]!;
+    const orchestrator = f.workspace().session;
+    f.emit([{ method: "turn/completed", params: { threadId: orchestrator.threadId,
+      turn: { id: orchestrator.activeTurnId, status: "completed" } } }]);
+    await until(() => Boolean(f.agents.workspace("task", task.id).session.activeTurnId), "Mandatory intake did not start");
+    const detail = f.tasks.getTask(task.id);
+    assert.equal(detail.projectId, project.id);
+    const description = plainTextFromDocument(detail.description);
+    assert.match(description, /Goal:\s*Inspect the production UX from evidence/);
+    assert.match(description, /Capture mobile and desktop evidence/);
+    assert.match(description, /Done when:\s*- Jamil reviews the findings/);
+    assert.equal(f.agents.workspace("task", task.id).session.accessMode, "read-only");
+    assert.equal((f.database.db.prepare("SELECT COUNT(*) AS n FROM orchestrator_task_creations").get() as { n: number }).n, 1);
+    assert.equal((f.database.db.prepare("SELECT COUNT(*) AS n FROM orchestrator_task_reviewers").get() as { n: number }).n, 1);
+    const taskTurn = f.requests().find(request => request.method === "turn/start"
+      && request.params.threadId === f.agents.workspace("task", task.id).session.threadId);
+    assert.equal(taskTurn?.params.approvalPolicy, "never");
+    assert.ok(!f.requests().some(request => request.method === "qahwa_tasks.create_tasks"));
+  } finally { f.close(); }
+});
+
+test("direct task creation rejects non-current authorization", async () => {
+  const f = coordinationFixture();
+  try {
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const userRequest = "What would a Wassala audit involve?";
+    await f.reply(envelope("I’ll keep this as a proposal.", [{
+      type: "create_task", idempotencyKey: "unauthorized-audit", projectId: project.id,
+      title: "Unauthorized audit", goal: "Do work", details: [], doneWhen: [], reviewerIds: [],
+      accessMode: "read-only", startNow: false, authorization: "Create the task now",
+    }]), userRequest);
+    await until(() => f.assistants().at(-1)?.body.includes("exact quote from the current user request") ?? false, "Authorization rejection was not reported");
+    assert.equal(f.tasks.listTasks({ tab: "all" }).length, 0);
+  } finally { f.close(); }
+});
+
+test("direct task creation enforces active project scope", async () => {
+  const f = coordinationFixture();
+  try {
+    await f.reply(envelope("I’ll validate the project target.", [{
+      type: "create_task", idempotencyKey: "wrong-project", projectId: "missing-project",
+      title: "Wrong project", goal: "Do work", details: [], doneWhen: [], reviewerIds: [],
+      accessMode: "worktree-write", startNow: false, authorization: "Create this task",
+    }]), "Create this task");
+    await until(() => f.assistants().at(-1)?.body.includes("Active project not found") ?? false, "Project rejection was not reported");
+    assert.equal(f.tasks.listTasks({ tab: "all" }).length, 0);
+  } finally { f.close(); }
+});
+
+test("direct task creation is idempotent across replay and service restart", async () => {
+  const f = coordinationFixture();
+  try {
+    f.agents.limit = 0;
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const authorization = "Create the Wassala redesign task";
+    await f.agents.send("orchestrator", "main", authorization);
+    const sourceMessageId = f.workspace().messages.find(message => message.role === "user")!.id;
+    const action = { type: "create_task", idempotencyKey: "wassala-redesign", projectId: project.id,
+      title: "Redesign Wassala Admin", goal: "Deliver the redesign", details: ["Preserve workflows"], doneWhen: ["Live verified"],
+      reviewerIds: [], accessMode: "worktree-write", startNow: false, authorization };
+    const apply = () => (f.agents as any).applyOrchestratorActions([action], authorization, null, "replayed-item", sourceMessageId);
+    await apply();
+    await apply();
+    f.restart();
+    f.agents.limit = 0;
+    const replay = await apply();
+    assert.match(replay[0].message, /already exists/);
+    assert.equal(f.tasks.listTasks({ tab: "all" }).length, 1);
+    assert.equal((f.database.db.prepare("SELECT COUNT(*) AS n FROM orchestrator_task_creations").get() as { n: number }).n, 1);
+  } finally { f.close(); }
+});
+
+test("an applicable standing directive can authorize direct task creation without a user turn", async () => {
+  const f = coordinationFixture();
+  try {
+    f.agents.limit = 0;
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const directive = { id: "deliver-wassala", instruction: "Create and run the authorized Wassala redesign work",
+      sourceQuote: "Create and run the authorized Wassala redesign work", createdAt: new Date().toISOString() };
+    f.database.setSetting("orchestrator_standing_directive", JSON.stringify(directive));
+    await (f.agents as any).applyOrchestratorActions([{ type: "create_task", idempotencyKey: "directive-redesign", projectId: project.id,
+      title: "Authorized redesign", goal: "Deliver the redesign", details: [], doneWhen: ["Verified live"], reviewerIds: [],
+      accessMode: "worktree-write", startNow: true, authorization: directive.sourceQuote, directiveId: directive.id }],
+    undefined, null, "directive-item", null);
+    await until(() => f.tasks.listTasks({ tab: "all" }).length === 1, "Standing directive did not create the task");
+    assert.equal((f.database.db.prepare("SELECT source_key FROM orchestrator_task_creations").get() as { source_key: string }).source_key,
+      `directive:${directive.id}`);
+  } finally { f.close(); }
 });

@@ -287,6 +287,81 @@ test("meeting management requests preserve origin authorization and specialist r
   } finally { f.close(); }
 });
 
+test("meeting-originated task creation shares the idempotent internal creation path", async () => {
+  const f = coordinationFixture();
+  try {
+    f.agents.limit = 0;
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const member = f.agents.team.createMember({ name: "Jamil", title: "Product Designer", instructions: "Review UX evidence." });
+    const meeting = f.agents.team.createMeeting({ title: "Kick-off", participantIds: [`member:${member.id}`] });
+    const authorization = "Create a read-only task to gather the admin evidence";
+    const sourceMessageId = f.agents.team.addMeetingMessage(meeting.id,
+      { speakerType: "user", speakerId: null, speakerName: "You", speakerTitle: "" }, authorization);
+    const request = f.agents.team.createManagementRequest({ meetingId: meeting.id, sourceMessageId,
+      requester: f.agents.team.participant(member), kind: "evidence", summary: "Gather the admin evidence", projectId: project.id });
+    const action = { type: "management_create_task", requestId: request.id, projectId: project.id,
+      title: "Gather Wassala admin evidence", description: "Capture mobile and desktop evidence",
+      accessMode: "read-only", authorization };
+    const apply = () => (f.agents as any).applyOrchestratorActions([action], undefined, null, "meeting-create", null);
+    await apply();
+    await apply();
+    const tasks = f.tasks.listTasks({ tab: "all" });
+    assert.equal(tasks.length, 1);
+    assert.equal(f.agents.team.getManagementRequest(request.id).taskId, tasks[0]!.id);
+    assert.equal(f.agents.workspace("task", tasks[0]!.id).session.accessMode, "read-only");
+    assert.equal((f.database.db.prepare("SELECT COUNT(*) AS n FROM orchestrator_task_creations WHERE source_key=?")
+      .get(`meeting:${sourceMessageId}`) as { n: number }).n, 1);
+  } finally { f.close(); }
+});
+
+test("direct task results return through the specialist correction and approval loop", async () => {
+  const f = coordinationFixture();
+  try {
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const member = f.agents.team.createMember({ name: "Jamil", title: "Product Designer", instructions: "Review UX evidence." });
+    const authorization = "Create the Wassala redesign and let Jamil review every result";
+    await f.agents.send("orchestrator", "main", authorization);
+    const sourceMessageId = f.agents.workspace("orchestrator", "main").messages.find(message => message.role === "user")!.id;
+    const action = { type: "create_task", idempotencyKey: "reviewed-redesign", projectId: project.id,
+      title: "Redesign Wassala Admin", goal: "Deliver a coherent redesign", details: ["Preserve workflows"],
+      doneWhen: ["Jamil approves"], reviewerIds: [member.id], accessMode: "worktree-write", startNow: false, authorization };
+    await (f.agents as any).applyOrchestratorActions([action], authorization, null, "direct-create", sourceMessageId);
+    const task = f.tasks.listTasks({ tab: "all" })[0]!;
+    const review = () => f.database.db.prepare(`SELECT * FROM orchestrator_task_reviewers LIMIT 1`).get() as any;
+
+    await (f.agents as any).queueDirectTaskReviews(task.id, "Initial redesign result");
+    await until(() => review().status === "awaiting_review", "Direct specialist review was not queued");
+    const memberSession = f.agents.team.ensureTaskSession(member.id, task.id);
+    const ownerId = memberSessionOwnerId(memberSession.id);
+    await until(() => Boolean(f.agents.workspace("orchestrator", ownerId).session.activeTurnId), "Specialist review turn did not start");
+    let session = f.agents.workspace("orchestrator", ownerId).session;
+    f.emit([
+      { method: "item/completed", params: { threadId: session.threadId, turnId: session.activeTurnId,
+        item: { id: "direct-corrections", type: "agentMessage", phase: "final_answer",
+          text: `The hierarchy needs correction.\n<!-- qahwa-management-review:{"decision":"changes_requested","feedback":"Strengthen the hierarchy"} -->` } } },
+      { method: "turn/completed", params: { threadId: session.threadId, turn: { id: session.activeTurnId, status: "completed" } } },
+    ]);
+    await until(() => review().status === "changes_requested", "Specialist corrections were not recorded");
+    await until(() => f.agents.workspace("orchestrator", ownerId).session.runState === "idle", "First specialist review did not finish");
+    await (f.agents as any).applyOrchestratorActions([{ type: "task_review_feedback", reviewId: review().id,
+      message: "Apply Jamil's hierarchy correction", authorization }], undefined, null, "direct-feedback", null);
+    assert.equal(review().status, "pending");
+    assert.ok(f.agents.workspace("task", task.id).messages.some(message => message.body.includes("Strengthen the hierarchy")));
+
+    await (f.agents as any).queueDirectTaskReviews(task.id, "Corrected redesign result");
+    await until(() => Boolean(f.agents.workspace("orchestrator", ownerId).session.activeTurnId), "Second specialist review did not start");
+    session = f.agents.workspace("orchestrator", ownerId).session;
+    f.emit([
+      { method: "item/completed", params: { threadId: session.threadId, turnId: session.activeTurnId,
+        item: { id: "direct-approval", type: "agentMessage", phase: "final_answer",
+          text: `The corrected hierarchy meets the bar.\n<!-- qahwa-management-review:{"decision":"approved","feedback":"Approved"} -->` } } },
+      { method: "turn/completed", params: { threadId: session.threadId, turn: { id: session.activeTurnId, status: "completed" } } },
+    ]);
+    await until(() => review().status === "approved", "Specialist approval was not recorded");
+    assert.equal(review().review_count, 2);
+  } finally { f.close(); }
+});
+
 test("meeting work is delegated once and returned to the requesting specialist for approval", async () => {
   const f = coordinationFixture();
   try {
