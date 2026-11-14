@@ -75,7 +75,12 @@ type ReviewSignal = { decision: "approved" | "changes_requested"; feedback: stri
 
 type DirectTaskReviewRow = {
   id: string; creation_id: string; member_id: string; status: "pending" | "awaiting_review" | "changes_requested" | "approved" | "failed";
-  latest_feedback: string | null; review_count: number; task_id: string; authorization_text: string;
+  snapshot_name: string; snapshot_title: string; latest_feedback: string | null; review_count: number; task_id: string; authorization_text: string;
+};
+
+type TaskReviewerContext = {
+  reviewId: string; memberId: string; snapshotName: string; snapshotTitle: string;
+  currentName: string | null; currentTitle: string | null; status: DirectTaskReviewRow["status"]; routable: boolean;
 };
 
 type OrchestratorOutcome = { status: "applied" | "queued" | "failed"; message: string };
@@ -181,6 +186,21 @@ function cleanActivityText(value: unknown, limit = 900): string | null {
     .trim();
   if (!cleaned) return null;
   return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned;
+}
+
+function safeTaskContextText(value: string, limit = 4_000): string {
+  const cleaned = value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/((?:authorization|api[_-]?key|token|password|secret|cookie|credential)\s*[:=]\s*)[^\s'\";,]+/gi, "$1[redacted]")
+    .trim();
+  return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned;
+}
+
+function safeStringList(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch { return []; }
 }
 
 const SUPERVISOR_POLICY_VERSION = "2026-11-management-v1";
@@ -349,7 +369,7 @@ export function buildTaskImplementationHandoff(task: { humanId: string; projectN
     .slice(-16)
     .map((message) => `${message.role === "user" ? "User" : "Intake agent"}: ${message.body.slice(0, 4_000)}`)
     .join("\n\n");
-  return `Begin implementation from this exact, immutable task charter.\nTask: ${task.humanId} · ${task.projectName}\nTitle: ${task.title}\nOriginal description: ${plainTextFromDocument(task.description as Parameters<typeof plainTextFromDocument>[0]) || task.title}\n\nClarified intake transcript:\n${transcript || "No additional clarification was recorded."}\n\nFollow the charter and resolved clarification above. Do not substitute adjacent work, even if the worktree contains tempting unrelated changes. Do not claim, modify, revert, or take ownership of pre-existing worktree changes unless this exact task requires it. Information, counting, audit, and research requests are read-only by default: answer from evidence and do not edit source files unless the user explicitly changes the task to implementation. Validate the actual requested result proportionately.`;
+  return `Begin implementation from this exact, immutable task charter.\n\nIMMUTABLE USER/TASK SCOPE (preserve separately from later resolutions):\nTask: ${task.humanId} · ${task.projectName}\nTitle: ${task.title}\nOriginal description: ${plainTextFromDocument(task.description as Parameters<typeof plainTextFromDocument>[0]) || task.title}\n\nHISTORICAL INTAKE TRANSCRIPT (context only; the authoritative resolved-intake handoff is supplied separately by Qahwa):\n${transcript || "No additional clarification was recorded."}\n\nFollow the immutable scope and Qahwa's authoritative resolved-intake handoff. Do not reopen settled questions merely because they appear in historical transcript text. Do not substitute adjacent work, even if the worktree contains tempting unrelated changes. Do not claim, modify, revert, or take ownership of pre-existing worktree changes unless this exact task requires it. Information, counting, audit, and research requests are read-only by default: answer from evidence and do not edit source files unless the user explicitly changes the task to implementation. Validate the actual requested result proportionately.`;
 }
 
 export function parseAgentEnvelope(text: string): {
@@ -1692,7 +1712,7 @@ Conversation input: ${userText}`;
     const intake = workspace.session.intakeState === "pending"
       ? `This task is in mandatory intake. You have read-only access. Assess the note against the actual project context before implementation. If any material choice, acceptance criterion, target, or reference is missing, ask concise questions and stop. If the work is genuinely unambiguous, classify access from the complete description and clarified user scope, state it explicitly, and append <!-- qahwa-intake:{"ready":true,"accessMode":"read-only"} --> for information, counting, audit, research or canvas-only preparation without file edits, or <!-- qahwa-intake:{"ready":true,"accessMode":"worktree-write"} --> when shared files must change. Never classify from a title alone. Otherwise append <!-- qahwa-intake:{"ready":false} -->. Do not edit files, implement, commit, deploy, or claim work has started during intake.`
       : `The intake is complete. ${this.accessInstructions(workspace.session.activeAccessMode ?? "worktree-write")}`;
-    const charter = `Immutable task charter: ${task.title}. Original description: ${plainTextFromDocument(task.description) || task.title}. Never substitute unrelated adjacent work. Information, counting, audit, and research tasks are read-only unless the user explicitly changes the scope.`;
+    const charter = `IMMUTABLE USER/TASK SCOPE (preserve separately from later authorized resolutions): Task charter: ${task.title}. Original description: ${plainTextFromDocument(task.description) || task.title}. Never substitute unrelated adjacent work. Information, counting, audit, and research tasks are read-only unless the user explicitly changes the scope.`;
     const selfDeploy = task.rootDirectory === process.cwd()
       ? `When deployment of Qahwa Tasks itself is explicitly authorized, never run PM2 or restart the service directly. After validation, run \`npm run deploy:self -- ${task.humanId}\`; it builds and requests a restart that occurs only after your final response and turn completion.`
       : "";
@@ -1701,7 +1721,77 @@ Conversation input: ${userText}`;
   }
 
   private developerInstructions(ownerType: SessionOwnerType, ownerId: string, intakeState: TaskIntakeState, worktreeRoot?: string): string {
-    return `${this.baseDeveloperInstructions(ownerType, ownerId, intakeState, worktreeRoot)}\n\n${FILE_DELIVERY_INSTRUCTIONS}`;
+    const taskContext = ownerType === "task" ? `\n\n${this.taskTurnContext(ownerId)}` : "";
+    return `${this.baseDeveloperInstructions(ownerType, ownerId, intakeState, worktreeRoot)}${taskContext}\n\n${FILE_DELIVERY_INSTRUCTIONS}`;
+  }
+
+  private taskReviewerContext(taskId: string): TaskReviewerContext[] {
+    const rows = this.database.db.prepare(`SELECT r.id AS reviewId,r.member_id AS memberId,r.status,
+      COALESCE(NULLIF(r.snapshot_name,''),m.name,'Archived reviewer') AS snapshotName,
+      COALESCE(NULLIF(r.snapshot_title,''),m.title,'Specialist reviewer') AS snapshotTitle,
+      CASE WHEN m.archived_at IS NULL THEN m.name ELSE NULL END AS currentName,
+      CASE WHEN m.archived_at IS NULL THEN m.title ELSE NULL END AS currentTitle,
+      CASE WHEN m.id IS NOT NULL AND m.archived_at IS NULL THEN 1 ELSE 0 END AS routable
+      FROM orchestrator_task_reviewers r
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id
+      LEFT JOIN team_members m ON m.id=r.member_id
+      WHERE c.task_id=? ORDER BY r.created_at,r.id`).all(taskId) as Array<Omit<TaskReviewerContext, "routable"> & { routable: number }>;
+    return rows.map(row => ({ ...row, routable: Boolean(row.routable) }));
+  }
+
+  private deliveredTaskResolutions(taskId: string): { userResolutions: string[]; orchestratorGuidance: string[] } {
+    const userRows = this.database.db.prepare(`SELECT m.body FROM chat_messages m
+      WHERE m.owner_type='task' AND m.owner_id=? AND m.role='user' AND m.cancelled_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id=m.id)
+        AND NOT EXISTS (SELECT 1 FROM message_schedules ms WHERE ms.message_id=m.id AND ms.state!='delivered')
+      ORDER BY m.created_at,m.rowid`).all(taskId) as Array<{ body: string }>;
+    const guidanceRows = this.database.db.prepare(`SELECT m.body FROM guidance_deliveries g
+      JOIN chat_messages m ON m.id=g.message_id
+      WHERE g.task_id=? AND g.status='delivered' AND m.cancelled_at IS NULL
+      ORDER BY m.created_at,m.rowid`).all(taskId) as Array<{ body: string }>;
+    return {
+      // The first user message starts the task and is already preserved in the immutable charter.
+      userResolutions: userRows.slice(1).slice(-12).map(row => safeTaskContextText(row.body, 2_000)).filter(Boolean),
+      orchestratorGuidance: guidanceRows.slice(-12).map(row => safeTaskContextText(row.body, 2_000)).filter(Boolean),
+    };
+  }
+
+  private saveTaskIntakeHandoff(taskId: string, summary: string, requestedAccessMode: TaskAccessMode): void {
+    const resolutions = this.deliveredTaskResolutions(taskId);
+    const timestamp = isoNow();
+    this.database.db.prepare(`INSERT INTO task_intake_handoffs
+      (task_id,intake_summary,resolved_user_context_json,delivered_guidance_json,requested_access_mode,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(task_id) DO UPDATE SET intake_summary=excluded.intake_summary,
+        resolved_user_context_json=excluded.resolved_user_context_json,
+        delivered_guidance_json=excluded.delivered_guidance_json,
+        requested_access_mode=excluded.requested_access_mode,updated_at=excluded.updated_at`)
+      .run(taskId, safeTaskContextText(summary, 8_000), JSON.stringify(resolutions.userResolutions),
+        JSON.stringify(resolutions.orchestratorGuidance), requestedAccessMode, timestamp, timestamp);
+  }
+
+  private taskTurnContext(taskId: string): string {
+    const task = this.tasks.getTask(taskId);
+    const session = this.ensureSession("task", taskId);
+    const handoff = this.database.db.prepare(`SELECT intake_summary,resolved_user_context_json,delivered_guidance_json,
+      requested_access_mode,updated_at FROM task_intake_handoffs WHERE task_id=?`).get(taskId) as {
+        intake_summary: string; resolved_user_context_json: string; delivered_guidance_json: string;
+        requested_access_mode: TaskAccessMode; updated_at: string;
+      } | undefined;
+    const current = this.deliveredTaskResolutions(taskId);
+    const savedUsers = handoff ? safeStringList(handoff.resolved_user_context_json) : [];
+    const savedGuidance = handoff ? safeStringList(handoff.delivered_guidance_json) : [];
+    const userResolutions = [...new Set([...savedUsers, ...current.userResolutions])].slice(-12);
+    const orchestratorGuidance = [...new Set([...savedGuidance, ...current.orchestratorGuidance])].slice(-12);
+    const reviewers = this.taskReviewerContext(taskId);
+    const reviewerBlock = reviewers.length ? `\n\nREGISTERED SPECIALIST REVIEWERS (structured Qahwa records):\n${JSON.stringify(reviewers)}\nReviewer contract: These are real Qahwa supervisory Codex member sessions, not humans to identify and not roles for the task worker to simulate. Produce concrete evidence for their independent review. Never invent or simulate their opinions, and never ask the user who they are. Route by memberId while routable; retain snapshotName and snapshotTitle for durable history after rename or archival.` : "";
+    return `AUTHORITATIVE TASK HANDOFF (Qahwa-managed; applies before reasoning on every turn):
+Immutable scope source: the separately labeled IMMUTABLE USER/TASK SCOPE in the task prompt. Later resolutions refine that scope but do not silently replace it.
+Resolved intake: ${handoff ? JSON.stringify({ summary: handoff.intake_summary, requestedAccessMode: handoff.requested_access_mode, recordedAt: handoff.updated_at }) : JSON.stringify({ state: session.intakeState, note: "No completed intake handoff is recorded yet." })}
+Authorized later user resolutions: ${JSON.stringify(userResolutions)}
+Delivered orchestrator guidance: ${JSON.stringify(orchestratorGuidance)}
+Current state: ${JSON.stringify({ intakeState: session.intakeState, requestedAccessMode: session.accessMode, activeAccessMode: session.activeAccessMode })}.
+Treat recorded resolutions and delivered guidance as settled unless a later explicit user instruction conflicts. Historical questions in transcripts are not open blockers by themselves. Do not ask the user to repeat context already present here.${reviewerBlock}`;
   }
 
   private accessInstructions(mode: TaskAccessMode): string {
@@ -1976,6 +2066,7 @@ Conversation input: ${userText}`;
           if (parsed.intakeAccessMode && session.accessVersion === 1) {
             this.requestTaskAccess(owner.ownerId, { mode: parsed.intakeAccessMode, expectedVersion: session.accessVersion });
           }
+          this.saveTaskIntakeHandoff(owner.ownerId, body, parsed.intakeAccessMode ?? session.accessMode ?? "worktree-write");
           this.updateSession("task", owner.ownerId, { intakeState: "ready" });
           this.database.db.prepare(`INSERT INTO scheduler_queue(task_id, requested_by, reason, created_at) VALUES (?, 'intake', ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET requested_by=excluded.requested_by, reason=excluded.reason, created_at=excluded.created_at`)
@@ -2079,8 +2170,8 @@ Conversation input: ${userText}`;
         VALUES (?,?,?,?,?,?,?,?,?)`).run(creationId, input.sourceKey, input.actionKey.trim(), requestHash, input.authorizationText,
           normalized.projectId, task.id, JSON.stringify(normalized.reviewerIds), timestamp);
       const insertReviewer = this.database.db.prepare(`INSERT INTO orchestrator_task_reviewers
-        (id,creation_id,member_id,created_at,updated_at) VALUES (?,?,?,?,?)`);
-      for (const reviewer of reviewers) insertReviewer.run(randomUUID(), creationId, reviewer.id, timestamp, timestamp);
+        (id,creation_id,member_id,snapshot_name,snapshot_title,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`);
+      for (const reviewer of reviewers) insertReviewer.run(randomUUID(), creationId, reviewer.id, reviewer.name, reviewer.title, timestamp, timestamp);
       if (normalized.startNow) this.database.db.prepare(`INSERT INTO scheduler_queue(task_id,requested_by,reason,created_at)
         VALUES (?, 'orchestrator', ?, ?) ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at`)
         .run(task.id, `Direct orchestrator task creation ${creationId}`, timestamp);
@@ -2096,10 +2187,12 @@ Conversation input: ${userText}`;
   }
 
   private directTaskReviewSnapshot(): unknown[] {
-    return this.database.db.prepare(`SELECT r.id,r.status,r.latest_feedback AS latestFeedback,r.review_count AS reviewCount,
-      t.human_id AS taskId,t.title,m.name AS reviewerName,m.title AS reviewerTitle
+    return this.database.db.prepare(`SELECT r.id,r.member_id AS memberId,r.status,r.latest_feedback AS latestFeedback,r.review_count AS reviewCount,
+      t.human_id AS taskId,t.title,r.snapshot_name AS snapshotName,r.snapshot_title AS snapshotTitle,
+      CASE WHEN m.archived_at IS NULL THEN m.name ELSE NULL END AS currentName,
+      CASE WHEN m.archived_at IS NULL THEN m.title ELSE NULL END AS currentTitle
       FROM orchestrator_task_reviewers r JOIN orchestrator_task_creations c ON c.id=r.creation_id
-      JOIN tasks t ON t.id=c.task_id JOIN team_members m ON m.id=r.member_id
+      JOIN tasks t ON t.id=c.task_id LEFT JOIN team_members m ON m.id=r.member_id
       WHERE r.status IN ('pending','awaiting_review','changes_requested') ORDER BY r.updated_at`)
       .all() as unknown[];
   }
@@ -2349,7 +2442,13 @@ Conversation input: ${userText}`;
       JOIN orchestrator_task_creations c ON c.id=r.creation_id WHERE c.task_id=? AND r.status='pending' ORDER BY r.created_at`)
       .all(task.id) as DirectTaskReviewRow[];
     for (const review of reviews) {
-      const member = this.team.getMember(review.member_id);
+      let member: ReturnType<TeamService["getMember"]>;
+      try { member = this.team.getMember(review.member_id); }
+      catch {
+        this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='failed',latest_feedback=?,updated_at=? WHERE id=? AND status='pending'`)
+          .run(`${review.snapshot_name} (${review.snapshot_title}) is archived and no longer routable; the durable reviewer snapshot remains attached to the task.`, isoNow(), review.id);
+        continue;
+      }
       const participant = this.team.participant(member);
       const output = task.outputs.at(-1);
       const artifacts = output?.artifacts.map(artifact => ({ filename: artifact.filename, availability: artifact.availability,

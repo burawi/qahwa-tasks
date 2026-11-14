@@ -590,6 +590,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_task_reviewers (
   id TEXT PRIMARY KEY,
   creation_id TEXT NOT NULL REFERENCES orchestrator_task_creations(id) ON DELETE CASCADE,
   member_id TEXT NOT NULL REFERENCES team_members(id),
+  snapshot_name TEXT NOT NULL,
+  snapshot_title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','awaiting_review','changes_requested','approved','failed')),
   latest_feedback TEXT,
   review_count INTEGER NOT NULL DEFAULT 0,
@@ -599,6 +601,16 @@ CREATE TABLE IF NOT EXISTS orchestrator_task_reviewers (
 );
 CREATE INDEX IF NOT EXISTS idx_orchestrator_task_reviewers_status
   ON orchestrator_task_reviewers(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS task_intake_handoffs (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  intake_summary TEXT NOT NULL,
+  resolved_user_context_json TEXT NOT NULL DEFAULT '[]',
+  delivered_guidance_json TEXT NOT NULL DEFAULT '[]',
+  requested_access_mode TEXT NOT NULL CHECK(requested_access_mode IN ('read-only','worktree-write')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
 `;
 
@@ -664,6 +676,13 @@ export class AppDatabase {
     if (!messageColumns.has("cancelled_at")) this.db.exec("ALTER TABLE chat_messages ADD COLUMN cancelled_at TEXT");
     if (!messageColumns.has("version")) this.db.exec("ALTER TABLE chat_messages ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
     if (!messageColumns.has("edited_at")) this.db.exec("ALTER TABLE chat_messages ADD COLUMN edited_at TEXT");
+    const reviewerColumns = new Set((this.db.prepare("PRAGMA table_info(orchestrator_task_reviewers)").all() as Array<{ name: string }>).map(row => row.name));
+    if (!reviewerColumns.has("snapshot_name")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN snapshot_name TEXT");
+    if (!reviewerColumns.has("snapshot_title")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN snapshot_title TEXT");
+    this.db.exec(`UPDATE orchestrator_task_reviewers
+      SET snapshot_name=COALESCE(NULLIF(snapshot_name,''),(SELECT name FROM team_members WHERE id=member_id),'Archived reviewer'),
+          snapshot_title=COALESCE(NULLIF(snapshot_title,''),(SELECT title FROM team_members WHERE id=member_id),'Specialist reviewer')
+      WHERE snapshot_name IS NULL OR snapshot_name='' OR snapshot_title IS NULL OR snapshot_title=''`);
     migrateDesignPages(this.db);
     this.migrateHandoffComments();
   }

@@ -175,10 +175,105 @@ test("direct orchestrator task creation is internal, structured, scoped, read-on
     assert.equal(f.agents.workspace("task", task.id).session.accessMode, "read-only");
     assert.equal((f.database.db.prepare("SELECT COUNT(*) AS n FROM orchestrator_task_creations").get() as { n: number }).n, 1);
     assert.equal((f.database.db.prepare("SELECT COUNT(*) AS n FROM orchestrator_task_reviewers").get() as { n: number }).n, 1);
+    const review = f.database.db.prepare("SELECT id,member_id,snapshot_name,snapshot_title,status FROM orchestrator_task_reviewers").get() as any;
+    assert.equal(review.member_id, reviewer.id);
+    assert.equal(review.snapshot_name, "Jamil");
+    assert.equal(review.snapshot_title, "Product Designer");
     const taskTurn = f.requests().find(request => request.method === "turn/start"
       && request.params.threadId === f.agents.workspace("task", task.id).session.threadId);
     assert.equal(taskTurn?.params.approvalPolicy, "never");
+    const taskThread = f.requests().find(request => request.method === "thread/start"
+      && String(request.params.developerInstructions).includes(`persistent Codex session for ${task.humanId}`));
+    const initialContext = String(taskThread?.params.developerInstructions);
+    assert.match(initialContext, /REGISTERED SPECIALIST REVIEWERS/);
+    assert.match(initialContext, new RegExp(review.id));
+    assert.match(initialContext, new RegExp(reviewer.id));
+    assert.match(initialContext, /"snapshotName":"Jamil"/);
+    assert.match(initialContext, /"snapshotTitle":"Product Designer"/);
+    assert.match(initialContext, /real Qahwa supervisory Codex member sessions/);
+    assert.match(initialContext, /never ask the user who they are/i);
+    assert.match(initialContext, /No completed intake handoff is recorded yet/);
     assert.ok(!f.requests().some(request => request.method === "qahwa_tasks.create_tasks"));
+  } finally { f.close(); }
+});
+
+test("reviewer and resolved-intake context survives access handoff, restart resume, and a fresh recovery thread", async () => {
+  const f = coordinationFixture();
+  try {
+    const project = f.tasks.createProject({ name: "Wassala", prefix: "WAS", rootDirectory: f.root }, "user");
+    const reviewer = f.agents.team.createMember({ name: "Jamil", title: "Product Designer", instructions: "Review UX evidence." });
+    const authorization = "Create and start the Wassala redesign with Jamil review";
+    await f.reply(envelope("I’ll start the redesign intake.", [{
+      type: "create_task", idempotencyKey: "review-context-lifecycle", projectId: project.id,
+      title: "Redesign Wassala Admin", goal: "Deliver a coherent admin redesign",
+      details: ["French and Arabic are required"], doneWhen: ["Jamil reviews concrete evidence"],
+      reviewerIds: [reviewer.id], accessMode: "worktree-write", startNow: true, authorization,
+    }]), authorization);
+    await until(() => f.tasks.listTasks({ tab: "all" }).length === 1, "Task was not created");
+    const task = f.tasks.listTasks({ tab: "all" })[0]!;
+    const orchestrator = f.workspace().session;
+    f.emit([{ method: "turn/completed", params: { threadId: orchestrator.threadId,
+      turn: { id: orchestrator.activeTurnId, status: "completed" } } }]);
+    await until(() => Boolean(f.agents.workspace("task", task.id).session.activeTurnId), "Intake did not start");
+    const intake = f.agents.workspace("task", task.id).session;
+    await (f.agents as any).messageTask(task.id, "Keep the resolved information architecture and do not ask the user to restate it", null, "resolved-guidance");
+    f.emit([
+      { method: "item/completed", params: { threadId: intake.threadId, turnId: intake.activeTurnId,
+        item: { id: "resolved-intake", type: "agentMessage", phase: "final_answer",
+          text: `Resolved contracts: keep English compatibility, add French and complete Arabic RTL; no further product decision is missing.\n<!-- qahwa-intake:{"ready":true,"accessMode":"worktree-write"} -->` } } },
+      { method: "turn/completed", params: { threadId: intake.threadId, turn: { id: intake.activeTurnId, status: "completed" } } },
+    ]);
+    await until(() => f.agents.workspace("task", task.id).session.threadId !== intake.threadId
+      && Boolean(f.agents.workspace("task", task.id).session.activeTurnId), "Implementation thread did not start");
+    let implementation = f.agents.workspace("task", task.id).session;
+    const implementationStart = f.requests().filter(request => request.method === "thread/start"
+      && request.params.cwd === f.root).at(-1)!;
+    const implementationContext = String(implementationStart.params.developerInstructions);
+    assert.match(implementationContext, /Resolved contracts: keep English compatibility/);
+    assert.match(implementationContext, /Keep the resolved information architecture/);
+    assert.match(implementationContext, /"requestedAccessMode":"worktree-write"/);
+    assert.match(implementationContext, /REGISTERED SPECIALIST REVIEWERS/);
+    assert.match(implementationContext, /Historical questions in transcripts are not open blockers/);
+    const implementationTurn = f.requests().filter(request => request.method === "turn/start"
+      && request.params.threadId === implementation.threadId).at(-1)!;
+    assert.match(String(implementationTurn.params.input[0].text), /IMMUTABLE USER\/TASK SCOPE/);
+    assert.match(String(implementationTurn.params.input[0].text), /authoritative resolved-intake handoff is supplied separately/);
+
+    f.emit([{ method: "turn/completed", params: { threadId: implementation.threadId,
+      turn: { id: implementation.activeTurnId, status: "completed" } } }]);
+    await until(() => f.agents.workspace("task", task.id).session.runState === "idle", "Implementation turn did not settle");
+    f.restart();
+    await f.agents.send("task", task.id, "Continue with the resolved implementation contracts");
+    implementation = f.agents.workspace("task", task.id).session;
+    const resumed = f.requests().filter(request => request.method === "thread/resume"
+      && request.params.threadId === implementation.threadId).at(-1)!;
+    assert.match(String(resumed.params.developerInstructions), /Resolved contracts: keep English compatibility/);
+    assert.match(String(resumed.params.developerInstructions), new RegExp(reviewer.id));
+
+    f.emit([{ method: "turn/completed", params: { threadId: implementation.threadId,
+      turn: { id: implementation.activeTurnId, status: "completed" } } }]);
+    await until(() => f.agents.workspace("task", task.id).session.runState === "idle", "Resumed turn did not settle");
+    f.agents.team.updateMember(reviewer.id, { name: "Jamil Design", title: "Design Manager" });
+    f.database.db.prepare(`UPDATE agent_sessions SET thread_id=NULL,active_turn_id=NULL,run_state='idle',generation=generation+1
+      WHERE owner_type='task' AND owner_id=?`).run(task.id);
+    await f.agents.send("task", task.id, "Continue in a fresh recovered context");
+    const recovered = f.agents.workspace("task", task.id).session;
+    const freshStart = f.requests().filter(request => request.method === "thread/start"
+      && request.params.cwd === f.root).at(-1)!;
+    const freshContext = String(freshStart.params.developerInstructions);
+    assert.match(freshContext, /Resolved contracts: keep English compatibility/);
+    assert.match(freshContext, /"snapshotName":"Jamil"/);
+    assert.match(freshContext, /"snapshotTitle":"Product Designer"/);
+    assert.match(freshContext, /"currentName":"Jamil Design"/);
+    assert.match(freshContext, /"currentTitle":"Design Manager"/);
+    assert.ok(recovered.threadId && recovered.threadId !== implementation.threadId);
+    f.agents.team.archiveMember(reviewer.id);
+    const archivedContext = String((f.agents as any).taskTurnContext(task.id));
+    assert.match(archivedContext, /"snapshotName":"Jamil"/);
+    assert.match(archivedContext, /"snapshotTitle":"Product Designer"/);
+    assert.match(archivedContext, /"currentName":null/);
+    assert.match(archivedContext, /"currentTitle":null/);
+    assert.match(archivedContext, /"routable":false/);
   } finally { f.close(); }
 });
 
