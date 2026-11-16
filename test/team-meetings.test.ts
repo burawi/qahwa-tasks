@@ -175,10 +175,42 @@ test("a task consultation is recorded in that member's task session", async () =
     await until(() => Boolean(f.agents.workspace("orchestrator", memberOwner).session.activeTurnId), "Member advisory turn did not start");
     const memberAgent = f.agents.workspace("orchestrator", memberOwner).session;
     const orchestratorAgent = f.agents.workspace("orchestrator", "main").session;
-    f.emit([memberAgent.threadId && memberAgent.activeTurnId ? { method: "turn/completed", params: { threadId: memberAgent.threadId, turn: { id: memberAgent.activeTurnId, status: "completed" } } } : null,
+    f.emit([memberAgent.threadId && memberAgent.activeTurnId ? { method: "item/completed", params: { threadId: memberAgent.threadId,
+      turnId: memberAgent.activeTurnId, item: { id: "consultation-response", type: "agentMessage", phase: "final_answer",
+        text: "One product correction is required before approval." } } } : null,
+      memberAgent.threadId && memberAgent.activeTurnId ? { method: "turn/completed", params: { threadId: memberAgent.threadId, turn: { id: memberAgent.activeTurnId, status: "completed" } } } : null,
       orchestratorAgent.threadId && orchestratorAgent.activeTurnId ? { method: "turn/completed", params: { threadId: orchestratorAgent.threadId, turn: { id: orchestratorAgent.activeTurnId, status: "completed" } } } : null].filter(Boolean));
     await until(() => f.agents.workspace("orchestrator", memberOwner).session.runState === "idle", "Member advisory turn did not settle");
+    await until(() => f.agents.workspace("task", task.id).messages.some(message => message.body.includes("One product correction")),
+      "Member response was not copied to the task");
+    const dispatch = f.database.db.prepare("SELECT id FROM team_dispatches WHERE source_id=? ORDER BY created_at DESC LIMIT 1")
+      .get(task.id) as { id: string };
+    await until(() => Boolean(f.database.db.prepare(`SELECT 1 FROM session_events
+      WHERE owner_type='orchestrator' AND owner_id='main' AND event_type='team.consultation_returned'
+        AND json_extract(payload_json,'$.dispatchId')=?`).get(dispatch.id)), "Returned consultation did not notify the orchestrator");
   } finally { f.close(); }
+});
+
+test("restart recovers a recently returned legacy consultation that was copied without notifying the orchestrator", async () => {
+  const f = coordinationFixture();
+  try {
+    const member = f.agents.team.createMember({ name: "Maya", title: "Product Lead", instructions: "Review product journeys." });
+    const task = f.task("Legacy product review");
+    const traceId = (f.agents as any).addMessage("task", task.id, "system", "Labib asked Maya for product review");
+    const dispatchId = f.agents.team.createDispatch(traceId, "task", task.id, f.agents.team.participant(member));
+    const responseId = (f.agents as any).addMessage("task", task.id, "assistant", "Changes requested: synchronize Back and Forward navigation.", {
+      speaker: { type: "member", id: member.id, name: member.name, title: member.title, avatar: member.avatar },
+      teamDispatchId: dispatchId,
+    });
+    f.agents.team.completeDispatch(dispatchId, responseId);
+    assert.equal(f.database.db.prepare("SELECT 1 FROM session_events WHERE event_type='team.consultation_returned'").get(), undefined);
+    await f.restart();
+    await until(() => Boolean(f.database.db.prepare(`SELECT 1 FROM session_events
+      WHERE owner_type='orchestrator' AND owner_id='main' AND event_type='team.consultation_returned'
+        AND json_extract(payload_json,'$.dispatchId')=?`).get(dispatchId)), "Restart did not recover the returned consultation");
+    await until(() => Boolean(f.agents.workspace("orchestrator", "main").session.activeTurnId),
+      "Recovered consultation did not start an orchestrator observation turn");
+  } finally { await f.close(); }
 });
 
 test("meeting replies use hidden meeting-only context and are copied into the durable transcript", async () => {

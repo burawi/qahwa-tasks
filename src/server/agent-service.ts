@@ -886,6 +886,7 @@ export class AgentService {
     `).run(restartedAt);
     this.recoverLegacySelfDeploys(restartedAt);
     this.recoverOverloadedTaskContexts(restartedAt);
+    this.recoverReturnedConsultations();
     const rows = this.database.db.prepare("SELECT thread_id, owner_type, owner_id FROM agent_sessions WHERE thread_id IS NOT NULL")
       .all() as Array<{ thread_id: string; owner_type: SessionOwnerType; owner_id: string }>;
     for (const row of rows) this.threadOwners.set(row.thread_id, { ownerType: row.owner_type, ownerId: row.owner_id });
@@ -1166,6 +1167,35 @@ export class AgentService {
           { contextRollover: true, previousThreadId: row.thread_id, recoveredAfterTimeout: Boolean(retried.changes) });
       })();
     }
+  }
+
+  private noteReturnedConsultation(dispatchId: string, taskId: string, participantName: string): void {
+    if (this.database.db.prepare(`SELECT 1 FROM session_events
+      WHERE owner_type='orchestrator' AND owner_id='main' AND event_type='team.consultation_returned'
+        AND json_extract(payload_json,'$.dispatchId')=? LIMIT 1`).get(dispatchId)) return;
+    const task = this.tasks.getTask(taskId);
+    this.recordEvent({ ownerType: "orchestrator", ownerId: "main" }, "team.consultation_returned",
+      { dispatchId, taskId, participantName });
+    this.orchestratorObservations.push(`${participantName} returned requested input for ${task.humanId} (${task.projectName}). Read the copied response in the task conversation and continue the authorized coordination loop.`);
+    this.scheduleOrchestratorObservation();
+  }
+
+  private recoverReturnedConsultations(): void {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    const rows = this.database.db.prepare(`SELECT d.id,d.source_id AS taskId,
+      COALESCE(tm.name,'Specialist') AS participantName
+      FROM team_dispatches d
+      JOIN tasks t ON t.id=d.source_id
+      JOIN chat_messages response ON response.id=d.response_message_id
+      LEFT JOIN team_members tm ON tm.id=d.participant_id
+      WHERE d.source_type='task' AND d.status='delivered' AND d.response_message_id IS NOT NULL
+        AND d.updated_at>=? AND t.status!='closed'
+        AND json_extract(COALESCE(response.metadata_json,'{}'),'$.specialistReview') IS NULL
+        AND NOT EXISTS (SELECT 1 FROM session_events e
+          WHERE e.owner_type='orchestrator' AND e.owner_id='main' AND e.event_type='team.consultation_returned'
+            AND json_extract(e.payload_json,'$.dispatchId')=d.id)
+      ORDER BY d.updated_at`).all(cutoff) as Array<{ id: string; taskId: string; participantName: string }>;
+    for (const row of rows) this.noteReturnedConsultation(row.id, row.taskId, row.participantName);
   }
 
   capacity(): CapacitySnapshot {
@@ -2375,6 +2405,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           avatar: sourceMetadata.participantAvatar === null || typeof sourceMetadata.participantAvatar === "object"
             ? sourceMetadata.participantAvatar as typeof currentParticipant.avatar : currentParticipant.avatar };
         let copiedId: string;
+        let returnedConsultationTaskId: string | null = null;
         if (responseTarget.type === "meeting" && typeof responseTarget.id === "string") {
           copiedId = this.team.addMeetingMessage(responseTarget.id, { speakerType: participant.type, speakerId: participant.id,
             speakerName: participant.name, speakerTitle: participant.title }, body);
@@ -2393,7 +2424,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
                 '$.specialistReview',?) WHERE id=?`).run(registeredReview.id, copiedId);
               this.advanceAfterDirectReview(registeredReview, parsed.managementReview, participant.name);
             }
-          }
+          } else returnedConsultationTaskId = responseTarget.id;
         } else if (responseTarget.type === "management_review" && typeof responseTarget.id === "string") {
           const request = this.team.getManagementRequest(responseTarget.id);
           copiedId = this.team.addMeetingMessage(request.meetingId, { speakerType: participant.type, speakerId: participant.id,
@@ -2417,6 +2448,9 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           this.advanceAfterDirectReview(review, normalizedSignal, participant.name);
         } else throw new Error("The response target is unavailable");
         this.team.completeDispatch(sourceMetadata.teamDispatchId, copiedId);
+        if (returnedConsultationTaskId) {
+          this.noteReturnedConsultation(sourceMetadata.teamDispatchId, returnedConsultationTaskId, participant.name);
+        }
         if (responseTarget.type === "meeting" && parsed.management && typeof responseTarget.id === "string") {
           const source = this.database.db.prepare("SELECT source_message_id FROM team_dispatches WHERE id=?")
             .get(sourceMetadata.teamDispatchId) as { source_message_id: string } | undefined;
