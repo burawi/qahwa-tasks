@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { workspacePoll } from "./workspace-poll.js";
 import { MessageReadService } from "./message-read-service.js";
 import type { WorkspaceCursor, MessagePageQuery } from "../domain/types.js";
-import { DomainError, assertDomain } from "../domain/errors.js";
+import { DomainError } from "../domain/errors.js";
 import { MAX_PROJECT_LOGO_BYTES, PROJECT_LOGO_SIZE_ERROR } from "../domain/project-logo.js";
 import type { RichTextDocument, TaskStatus } from "../domain/types.js";
 import { AuthService } from "./auth.js";
@@ -19,7 +19,7 @@ import { AgentService } from "./agent-service.js";
 import { TaskIdleNotifier } from "./task-idle-notifier.js";
 import { AppPushService } from "./app-push-service.js";
 import { PairingService } from "./pairing.js";
-import { ATTACHMENT_LIMITS, AttachmentService, meetingAttachmentOwnerId } from "./attachment-service.js";
+import { ATTACHMENT_LIMITS, AttachmentService } from "./attachment-service.js";
 import { getOrchestratorSettings, saveOrchestratorSettings } from "./orchestrator-settings.js";
 import { MAX_USER_AVATAR_BYTES, USER_AVATAR_SIZE_ERROR } from "../domain/user-avatar.js";
 import { getUserAvatar, resetUserAvatar, saveUserAvatar, userAvatarImage } from "./user-avatar.js";
@@ -27,7 +27,6 @@ import { getOrchestratorAvatar, resetOrchestratorAvatar, saveOrchestratorAvatar,
 import { TaskTitleService, type TaskTitleGenerator } from "./task-title-service.js";
 import { TerminalService } from "./terminal-service.js";
 import { registerMessageFileRoutes } from "./message-file-routes.js";
-import { memberSessionOwnerId } from "./team-service.js";
 
 const publicRoot = join(process.cwd(), "dist/public");
 const legacyScriptRecovery = `void async function(){try{for(const key of await caches.keys())if(key.startsWith("qahwa-tasks-"))await caches.delete(key);const registration=await navigator.serviceWorker?.getRegistration();await registration?.update()}finally{const url=new URL("/",location.origin);url.searchParams.set("recovered",Date.now().toString());location.replace(url)}}();`;
@@ -240,7 +239,7 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     await terminals.close();
     await voice.close();
     await titles.close();
-    await agents.close();
+    agents.close();
     attachments.close();
     database.close();
   });
@@ -433,60 +432,6 @@ function registerTaskRoutes(app: FastifyInstance, context: AppContext): void {
 
 function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   const reads = new MessageReadService(context.database);
-  app.get("/api/team", async () => ({ members: context.agents.team.listMembers() }));
-  app.get("/api/team/participants", async () => ({ participants: context.agents.team.availableParticipants() }));
-  app.get<{ Params: { id: string } }>("/api/team/:id/avatar/image", async (request, reply) => {
-    const image = context.agents.team.avatarImage(request.params.id);
-    return reply.type(image.mimeType).header("content-length", image.bytes.length).send(image.bytes);
-  });
-  app.get<{ Params: { id: string } }>("/api/team/:id/sessions", async request => ({
-    sessions: context.agents.team.listMemberSessions(request.params.id),
-  }));
-  app.post<{ Params: { id: string }; Body: { title?: unknown } }>("/api/team/:id/sessions", async (request, reply) =>
-    reply.code(201).send({ session: context.agents.team.createManualSession(request.params.id, request.body ?? {}) }));
-  app.get<{ Params: { id: string; sessionId: string } }>("/api/team/:id/sessions/:sessionId/unread", async request => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    const ownerId = memberSessionOwnerId(request.params.sessionId);
-    return { readState: reads.unread("orchestrator", ownerId), sessionState: context.agents.sessionRunState("orchestrator", ownerId) };
-  });
-  app.post<{ Params: { id: string; sessionId: string }; Body: { messageIds?: unknown } }>("/api/team/:id/sessions/:sessionId/read", async request => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    return { readState: reads.markRead("orchestrator", memberSessionOwnerId(request.params.sessionId), request.body?.messageIds) };
-  });
-  app.get<{ Params: { id: string; sessionId: string }; Querystring: MessagePageQuery }>("/api/team/:id/sessions/:sessionId/messages", async request => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    return { page: context.agents.messagePage("orchestrator", memberSessionOwnerId(request.params.sessionId), request.query) };
-  });
-  app.get<{ Params: { id: string; sessionId: string }; Querystring: WorkspaceCursor & { poll?: string } }>("/api/team/:id/sessions/:sessionId/workspace", async request => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    const workspace = context.agents.workspace("orchestrator", memberSessionOwnerId(request.params.sessionId));
-    return request.query.poll === "1" ? workspacePoll(workspace, request.query) : { workspace };
-  });
-  app.post<{ Params: { id: string; sessionId: string }; Body: { message?: string } }>("/api/team/:id/sessions/:sessionId/messages", async (request, reply) => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    const workspace = await context.agents.send("orchestrator", memberSessionOwnerId(request.params.sessionId), request.body.message ?? "");
-    return reply.code(202).send({ workspace });
-  });
-  app.post<{ Params: { id: string; sessionId: string } }>("/api/team/:id/sessions/:sessionId/interrupt", async request => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    return { workspace: await context.agents.interrupt("orchestrator", memberSessionOwnerId(request.params.sessionId)) };
-  });
-  app.put<{ Params: { id: string; sessionId: string }; Body: unknown }>("/api/team/:id/sessions/:sessionId/model", async request => {
-    context.agents.team.getMemberSession(request.params.id, request.params.sessionId);
-    return { workspace: await context.agents.saveChatModel("orchestrator", memberSessionOwnerId(request.params.sessionId), request.body) };
-  });
-  app.get("/api/meetings", async () => ({ meetings: context.agents.team.listMeetings() }));
-  app.post<{ Body: { title?: unknown; participantIds?: unknown } }>("/api/meetings", async (request, reply) =>
-    reply.code(201).send({ meeting: context.agents.team.createMeeting(request.body ?? {}) }));
-  app.get<{ Params: { id: string } }>("/api/meetings/:id", async request => ({
-    meeting: context.agents.team.getMeeting(request.params.id), messages: context.agents.meetingMessages(request.params.id),
-  }));
-  app.post<{ Params: { id: string } }>("/api/meetings/:id/archive", async request => ({ meeting: context.agents.team.archiveMeeting(request.params.id) }));
-  app.post<{ Params: { id: string }; Body: { message?: unknown; attachmentIds?: unknown; requestId?: unknown } }>("/api/meetings/:id/messages", async (request, reply) => {
-    const deviceId = context.auth.requireSession(request).deviceId;
-    return reply.code(202).send(await context.agents.sendMeetingMessage(request.params.id, request.body?.message,
-      request.body?.attachmentIds, deviceId, request.body?.requestId));
-  });
   app.get<{ Params: { id: string } }>("/api/tasks/:id/unread", async (request) => ({
     readState: reads.unread("task", context.tasks.getTask(request.params.id).id),
   }));
@@ -590,13 +535,6 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
       return reply.code(202).send({ transcription: await context.voice.start(attachment!, deviceId, () => context.attachments.remove(attachment!.id, deviceId)) });
     });
   }
-  app.post<{ Params: { id: string; attachmentId: string } }>("/api/meetings/:id/voice/:attachmentId/transcription", async (request, reply) => {
-    const meeting = context.agents.team.getMeeting(request.params.id);
-    assertDomain(meeting.status === "active", "Archived meetings cannot receive messages", "meeting_archived", 409);
-    const deviceId = context.auth.requireSession(request).deviceId;
-    const [attachment] = context.attachments.prepareForMessage("orchestrator", meetingAttachmentOwnerId(meeting.id), deviceId, [request.params.attachmentId]);
-    return reply.code(202).send({ transcription: await context.voice.start(attachment!, deviceId, () => context.attachments.remove(attachment!.id, deviceId)) });
-  });
   app.get<{ Params: { id: string } }>("/api/voice-transcriptions/:id", async (request) => ({
     transcription: context.voice.get(request.params.id, context.auth.requireSession(request).deviceId),
   }));
@@ -612,12 +550,6 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   app.post<{ Body: { filename?: unknown; mediaType?: unknown; size?: unknown } }>("/api/orchestrator/attachments", async (request, reply) => {
     const deviceId = context.auth.requireSession(request).deviceId;
     return reply.code(201).send({ attachment: context.attachments.initiate("orchestrator", "main", deviceId, request.body) });
-  });
-  app.post<{ Params: { id: string }; Body: { filename?: unknown; mediaType?: unknown; size?: unknown } }>("/api/meetings/:id/attachments", async (request, reply) => {
-    const meeting = context.agents.team.getMeeting(request.params.id);
-    assertDomain(meeting.status === "active", "Archived meetings cannot receive attachments", "meeting_archived", 409);
-    const deviceId = context.auth.requireSession(request).deviceId;
-    return reply.code(201).send({ attachment: context.attachments.initiate("orchestrator", meetingAttachmentOwnerId(meeting.id), deviceId, request.body) });
   });
   app.put<{ Params: { id: string; chunk: string }; Body: Buffer }>("/api/attachments/:id/chunks/:chunk", async (request) => {
     const deviceId = context.auth.requireSession(request).deviceId;
@@ -639,11 +571,6 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   });
   app.get<{ Params: { attachmentId: string }; Querystring: { offset?: string } }>("/api/orchestrator/attachments/:attachmentId", async (request, reply) => {
     const result = context.attachments.resolveDownload("orchestrator", "main", request.params.attachmentId);
-    return sendAttachment(reply, result.path, result.attachment.filename, result.attachment.mediaType, result.attachment.size, request.query.offset);
-  });
-  app.get<{ Params: { id: string; attachmentId: string }; Querystring: { offset?: string } }>("/api/meetings/:id/attachments/:attachmentId", async (request, reply) => {
-    const meeting = context.agents.team.getMeeting(request.params.id);
-    const result = context.attachments.resolveDownload("orchestrator", meetingAttachmentOwnerId(meeting.id), request.params.attachmentId);
     return sendAttachment(reply, result.path, result.attachment.filename, result.attachment.mediaType, result.attachment.size, request.query.offset);
   });
   app.post<{ Params: { requestId: string }; Body: { approved?: boolean; answers?: Record<string, string> } }>(

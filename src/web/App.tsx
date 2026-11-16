@@ -1,4 +1,4 @@
-import { Archive, ArrowLeft, Check, ChevronDown, Link2, ListTodo, MessagesSquare, MonitorSmartphone, Plus, Search, Settings2, ShieldCheck, UsersRound, X } from "lucide-react";
+import { Archive, ArrowLeft, Check, ChevronDown, Link2, ListTodo, MonitorSmartphone, Plus, Search, Settings2, ShieldCheck, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { Project, SelectedTaskReference, TaskSummary } from "../domain/types";
 import { api, connection, type ConnectionState } from "./api";
@@ -25,10 +25,8 @@ const CreateTask = lazy(() => import("./components/CreateTask").then((module) =>
 const ProjectManager = lazy(() => import("./components/ProjectManager").then((module) => ({ default: module.ProjectManager })));
 const SessionWorkspace = lazy(() => import("./components/SessionWorkspace").then((module) => ({ default: module.SessionWorkspace })));
 const TaskChat = lazy(() => import("./components/TaskChat").then(module => ({ default: module.TaskChat })));
-const TeamPage = lazy(() => import("./components/TeamPage").then(module => ({ default: module.TeamPage })));
-const MeetingsPage = lazy(() => import("./components/MeetingsPage").then(module => ({ default: module.MeetingsPage })));
 
-type View = "tasks" | "orchestrator" | "team" | "meetings";
+type View = "tasks" | "orchestrator";
 type Scope = "active" | "closed";
 const orchestratorReads = {
   load: () => api.orchestratorUnread(),
@@ -38,7 +36,7 @@ const orchestratorReads = {
 export function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>(connection.state());
   const [workspaceOpened, setWorkspaceOpened] = useState(connection.state() === "online");
-  const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname));
+  const [view, setView] = useState<View>(() => window.location.pathname === "/orchestrator" ? "orchestrator" : "tasks");
   const [scope, setScope] = useState<Scope>("active");
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -125,7 +123,7 @@ export function App() {
   }, [connectionState, offline, scope, projectId]);
   useEffect(() => {
     const online = () => setOffline(false); const offlineHandler = () => setOffline(true);
-    const pop = () => { setSelectedTask(taskFromPath()); setView(viewFromPath(window.location.pathname)); };
+    const pop = () => { setSelectedTask(taskFromPath()); setView(window.location.pathname === "/orchestrator" ? "orchestrator" : "tasks"); };
     window.addEventListener("online", online); window.addEventListener("offline", offlineHandler); window.addEventListener("popstate", pop);
     return () => { window.removeEventListener("online", online); window.removeEventListener("offline", offlineHandler); window.removeEventListener("popstate", pop); };
   }, []);
@@ -146,16 +144,14 @@ export function App() {
   const closeSearch = () => { setSearch(""); setShowSearch(false); searchToggle.current?.focus(); };
   const selectedProject = activeProjects.find((project) => project.id === projectId);
   const openTask = (task: TaskSummary) => { history.pushState({}, "", `/tasks/${task.humanId}`); setView("tasks"); setSelectedTask(task.humanId); };
-  const selectView = (next: View) => { history.pushState({}, "", next === "orchestrator" ? "/orchestrator" : next === "team" ? "/team" : next === "meetings" ? "/meetings" : "/"); setSelectedTask(null); setView(next); window.dispatchEvent(new PopStateEvent("popstate")); };
+  const selectView = (next: View) => { history.pushState({}, "", next === "orchestrator" ? "/orchestrator" : "/"); setSelectedTask(null); setView(next); };
 
   return <UserAvatarProvider key={profile?.serverPublicKey ?? ""} connected={connected}><OrchestratorAvatarProvider connected={connected}><CodexUsageProvider connected={connected} onOpenDetails={() => { setShowUsageDetails(true); setShowProjects(true); }}><div className="app-shell unified-shell">
     <header className="app-header unified-header">
       <button type="button" className="brand" onClick={() => selectView("tasks")} aria-label="Qahwa Tasks home"><BrandMark /><div><strong>Qahwa</strong><small>Tasks</small></div></button>
       <nav className="desktop-tabs" aria-label="Main navigation">
+        <button type="button" className={view === "tasks" ? "active" : ""} onClick={() => selectView("tasks")}><ListTodo />Tasks</button>
         <button type="button" className={view === "orchestrator" ? "active" : ""} onClick={() => selectView("orchestrator")}><OrchestratorAvatar /><span className="orchestrator-name" title={orchestratorName}>{orchestratorName}</span><RunningIndicator running={orchestratorReadState.sessionState === "running"} label={`${orchestratorName} running`} /><UnreadBadge count={orchestratorReadState.unreadCount} /></button>
-        <button type="button" className={view === "team" ? "active" : ""} onClick={() => selectView("team")}><UsersRound /><span>Team</span></button>
-        <button type="button" className={view === "meetings" ? "active" : ""} onClick={() => selectView("meetings")}><MessagesSquare /><span>Meetings</span></button>
-        <button type="button" className={view === "tasks" ? "active" : ""} onClick={() => selectView("tasks")}><ListTodo /><span>Tasks</span></button>
       </nav>
       <div className="header-actions">
       <CodexUsageIndicator />
@@ -186,12 +182,10 @@ export function App() {
       {selectedTasks.length > 0 && <TaskSelection orchestratorName={orchestratorName} tasks={selectedTasks} onClear={clearSelection} onRemove={toggleSelection} onDiscuss={() => selectView("orchestrator")} onPin={(pinned) => void pinSelected(pinned)} pinDisabled={!connected || pinBusy} />}
       <div className="task-rows">{visibleTasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => openTask(task)} selectionMode={selectedTasks.length > 0} selected={selectedTasks.some(({ id }) => id === task.id)} onToggleSelection={() => toggleSelection(task)} />)}</div>
       {visibleTasks.length === 0 && (searching ? <div className="empty-state refined-empty"><span><Search /></span><h2>No matching tasks or sessions</h2><p>Try another title, task ID, project name, or description. Searching {scope === "closed" ? "completed history" : "active tasks"} in {selectedProject?.name ?? "all projects"}.</p><button type="button" className="secondary" onClick={clearSearch}>Clear search</button></div> : <div className="empty-state refined-empty"><span><Check /></span><h2>{scope === "closed" ? "No completed tasks" : !projectId ? "A clear workspace" : "Nothing here yet"}</h2><p>{scope === "closed" ? "Completed work will stay quietly available here." : !projectId ? "Add a quick note. Its session will help shape the work when you start it." : "No tasks match this project."}</p>{scope === "active" && activeProjects.length > 0 && <button type="button" className="primary" onClick={() => setShowCreate(true)}><Plus />Create your first task</button>}</div>)}
-    </main> : view === "orchestrator" ? <Suspense fallback={<div className="screen-loading">Loading session…</div>}><SessionWorkspace mode="orchestrator" orchestratorName={orchestratorName} connected={connected} selectedTasks={selectedTasks} onClearTaskSelection={clearSelection} onRemoveTaskSelection={toggleSelection} highlightedMessageIds={orchestratorReadState.highlightedIds} onMessagesLoaded={orchestratorReadState.onMessagesLoaded} onError={fail} onChanged={() => void loadTasks()} /></Suspense>
-      : view === "team" ? <Suspense fallback={<div className="screen-loading">Loading team…</div>}><TeamPage connected={connected} onError={fail} /></Suspense>
-      : <Suspense fallback={<div className="screen-loading">Loading meetings…</div>}><MeetingsPage connected={connected} onError={fail} /></Suspense>}
+    </main> : <Suspense fallback={<div className="screen-loading">Loading session…</div>}><SessionWorkspace mode="orchestrator" orchestratorName={orchestratorName} connected={connected} selectedTasks={selectedTasks} onClearTaskSelection={clearSelection} onRemoveTaskSelection={toggleSelection} highlightedMessageIds={orchestratorReadState.highlightedIds} onMessagesLoaded={orchestratorReadState.onMessagesLoaded} onError={fail} onChanged={() => void loadTasks()} /></Suspense>}
 
     {view === "tasks" && activeProjects.length > 0 && <button type="button" className="fab" aria-label="New task" title="New task" data-qahwa-id="fab" onClick={() => setShowCreate(true)}><Plus aria-hidden="true" /></button>}
-    <nav className="bottom-tabs four-tabs" aria-label="Main navigation" data-qahwa-id="bottom-tabs"><button type="button" className={view === "orchestrator" ? "active" : ""} aria-current={view === "orchestrator" ? "page" : undefined} onClick={() => selectView("orchestrator")}><OrchestratorAvatar /><span className="orchestrator-name" title={orchestratorName}>{orchestratorName}</span><RunningIndicator running={orchestratorReadState.sessionState === "running"} label={`${orchestratorName} running`} /><UnreadBadge count={orchestratorReadState.unreadCount} /></button><button type="button" className={view === "team" ? "active" : ""} aria-current={view === "team" ? "page" : undefined} onClick={() => selectView("team")}><UsersRound /><span>Team</span></button><button type="button" className={view === "meetings" ? "active" : ""} aria-current={view === "meetings" ? "page" : undefined} onClick={() => selectView("meetings")}><MessagesSquare /><span>Meetings</span></button><button type="button" className={view === "tasks" ? "active" : ""} aria-current={view === "tasks" ? "page" : undefined} onClick={() => selectView("tasks")}><ListTodo /><span>Tasks</span></button></nav>
+    <nav className="bottom-tabs two-tabs" aria-label="Main navigation" data-qahwa-id="bottom-tabs"><button type="button" className={view === "tasks" ? "active" : ""} aria-current={view === "tasks" ? "page" : undefined} onClick={() => selectView("tasks")}><ListTodo /><span>Tasks</span></button><button type="button" className={view === "orchestrator" ? "active" : ""} aria-current={view === "orchestrator" ? "page" : undefined} onClick={() => selectView("orchestrator")}><OrchestratorAvatar /><span className="orchestrator-name" title={orchestratorName}>{orchestratorName}</span><RunningIndicator running={orchestratorReadState.sessionState === "running"} label={`${orchestratorName} running`} /><UnreadBadge count={orchestratorReadState.unreadCount} /></button></nav>
 
     <Suspense fallback={<div className="screen-loading">Loading…</div>}>
       {showCreate && <CreateTask connected={connected} projects={activeProjects} initialProjectId={preferredCreateProjectId(activeProjects, lastCreateProjectId, projectId)} onCancel={() => setShowCreate(false)} onProjectChange={(id) => { writeLastCreateProjectId(id); setLastCreateProjectId(id); }} onSave={async (value) => {
@@ -234,11 +228,4 @@ function ConnectionScreen({ state, onError }: { state: ConnectionState; onError:
 
 function taskFromPath(): string | null {
   return taskIdFromPath(window.location.pathname);
-}
-
-function viewFromPath(path: string): View {
-  if (path === "/orchestrator") return "orchestrator";
-  if (path === "/team" || path.startsWith("/team/")) return "team";
-  if (path === "/meetings" || path.startsWith("/meetings/")) return "meetings";
-  return "tasks";
 }

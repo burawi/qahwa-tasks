@@ -27,7 +27,6 @@ function fixture(t: TestContext) {
   const configure = () => {
     t.mock.method(agents,"capacity",() => ({ activeTurns: 0, availableSlots: slots } as any));
     const codex = Reflect.get(agents,"codex");
-    t.mock.method(agents as any,"runtimeForOwner",()=>codex);
     t.mock.method(codex,"initialize",async () => { await gate; });
     t.mock.method(codex,"request",async (method: string, params: any) => {
       calls.push({method,params});
@@ -317,12 +316,9 @@ test("access API validates mode, optimistic version, closed/terminal tasks, auth
   const auth=new AuthService(f.db,365),app=await buildApp(f.config,f.db);
   const url=`/api/tasks/${task.humanId}/access`,payload={mode:"read-only",expectedVersion:1};
   assert.equal((await app.inject({method:"PUT",url,payload})).statusCode,401);
-  assert.equal((await app.inject({method:"POST",url:`/api/tasks/${task.humanId}/interrupt`})).statusCode,401);
-  assert.equal((await app.inject({method:"POST",url:"/api/orchestrator/interrupt"})).statusCode,401);
   const now=new Date().toISOString();f.db.db.prepare("INSERT INTO paired_devices(id,name,public_key,created_at,last_seen_at) VALUES ('device','Test','',?,?)").run(now,now);
   const session=auth.createSession("test","127.0.0.1","device"),headers={authorization:`Bearer ${session.token}`,origin:"http://localhost"};
   assert.equal((await app.inject({method:"PUT",url,headers:{...headers,origin:"https://invalid.example"},payload})).statusCode,403);
-  assert.equal((await app.inject({method:"POST",url:`/api/tasks/${task.humanId}/interrupt`,headers:{...headers,origin:"https://invalid.example"}})).statusCode,403);
   assert.equal((await app.inject({method:"PUT",url,headers,payload:{...payload,mode:"guess"}})).statusCode,400);
   const result=await app.inject({method:"PUT",url,headers,payload});assert.equal(result.statusCode,200);
   assert.equal(result.json().workspace.session.accessMode,"read-only");assert.equal(f.calls.length,0);

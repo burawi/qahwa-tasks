@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentService } from '../src/server/agent-service.js';
@@ -16,9 +16,6 @@ function fixture(t: TestContext) {
   const db = new AppDatabase(config), tasks = new TaskService(db), attachments = new AttachmentService(db);
   const agents = new AgentService(db, tasks, attachments);
   const client = Reflect.get(agents, 'codex');
-  // Keep these state-machine tests on one mocked transport. Dedicated task
-  // controller isolation has its own focused test below.
-  t.mock.method(agents as any, 'runtimeForOwner', () => client);
   const calls: Array<{method: string; params: any}> = [];
   const loaded = new Set<string>();
   const runtime = new Map<string, string>();
@@ -52,7 +49,7 @@ function fixture(t: TestContext) {
     db.db.prepare('INSERT INTO pending_messages(message_id) VALUES (?)').run(`message-${id}`);
     return `message-${id}`;
   };
-  t.after(async () => { await agents.close().catch(() => undefined); attachments.close(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { agents.close(); attachments.close(); db.close(); rmSync(root, { recursive: true, force: true }); });
   return { config, db, tasks, agents, client, calls, loaded, runtime, owner, message,
     hook(fn: typeof hook) { hook = fn; },
     tick: () => Reflect.get(agents,'releaseInactiveSessions').call(agents) as Promise<void>,
@@ -106,13 +103,12 @@ test('idle grace applies to open sessions; UI and separate-connection MCP closur
   assert.equal(f.agents.workspace('task',warm.id).session.runState,'idle');
 });
 
-test('active work must pause before MCP closure and remains subscribed until then',async t=>{
+test('does not unload active work even if task is closed through MCP',async t=>{
   const f=fixture(t),o=f.owner('task','running');
   f.tasks.transition(o.id,{to:'in_progress'},'codex');
-  assert.throws(()=>f.tasks.transition(o.id,{to:'closed',outcome:'cancelled',explicitUserInstruction:'Cancel'},'codex'),{code:'task_running'});
+  f.tasks.transition(o.id,{to:'closed',outcome:'cancelled',explicitUserInstruction:'Cancel'},'codex');
   await f.tick(); assert.deepEqual(f.releases(),[]);
   f.events({method:'turn/completed',params:{threadId:o.threadId,turn:{id:'old-turn',status:'interrupted'}}});
-  f.tasks.transition(o.id,{to:'closed',outcome:'cancelled',explicitUserInstruction:'Cancel'},'codex');
   await f.tick(); assert.deepEqual(f.releases(),[o.threadId]);
 });
 
@@ -241,8 +237,7 @@ test('unload preserves attachments, canvas, outputs and saved associations',asyn
     .run(o.id,JSON.stringify({format:'web',artboard:{width:390,height:844,background:'#fff',name:'Canvas'},html:'<p data-qahwa-id="saved">Keep</p>',css:''}),timestamp,timestamp);
   f.tasks.addOutput(o.id,{summary:'Saved result',validation:['Passed'],limitations:[]},'codex');
   const tables=['agent_sessions','chat_messages','attachment_uploads','design_pages','task_outputs','tasks','task_schedules','message_schedules'];
-  const read=()=>Object.fromEntries(tables.map(table=>[table,f.db.db.prepare(table==='agent_sessions'
-    ? "SELECT * FROM agent_sessions WHERE owner_type='task' ORDER BY rowid" : `SELECT * FROM ${table} ORDER BY rowid`).all()]));
+  const read=()=>Object.fromEntries(tables.map(table=>[table,f.db.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
   const before=read();
   await f.tick();assert.deepEqual(f.releases(),[o.threadId]);assert.deepEqual(read(),before);
   assert.equal(readFileSync(attachments.resolveDownload('task',o.id,upload.id).path,'utf8'),'context');
@@ -277,376 +272,8 @@ test('completion before turn/start acknowledgement remains idle and eligible for
   await f.tick();assert.deepEqual(f.releases(),[o.threadId]);
 });
 
-test('pause reconciles a stale runtime turn and repeated requests stay idempotent',async t=>{
-  const f=fixture(t),o=f.owner('task','running');
-  f.db.db.prepare("UPDATE agent_sessions SET active_turn_id='stale-turn' WHERE owner_id=?").run(o.id);
-  f.runtime.set(o.threadId,'idle');
-  await f.agents.interrupt('task',o.id);
-  await f.agents.interrupt('task',o.id);
-  const session=f.agents.workspace('task',o.id).session;
-  assert.equal(session.runState,'interrupted');
-  assert.equal(session.activeTurnId,null);
-  assert.equal(f.calls.some(call=>call.method==='turn/interrupt'),false);
-});
-
-test('acknowledged pause verifies runtime stop before releasing the task',async t=>{
-  const f=fixture(t),o=f.owner('task','running');
-  f.db.db.prepare("UPDATE agent_sessions SET active_turn_id='active-turn' WHERE owner_id=?").run(o.id);
-  f.runtime.set(o.threadId,'active');
-  let forced=0;
-  t.mock.method(f.client,'forceStop',async()=>{forced++;});
-  f.hook(async method=>{if(method==='turn/interrupt')f.runtime.set(o.threadId,'idle');});
-  await f.agents.interrupt('task',o.id);
-  assert.equal(f.agents.workspace('task',o.id).session.runState,'interrupted');
-  assert.equal(forced,0);
-});
-
-test('main orchestrator keeps supervisory instructions with operational runtime access',async t=>{
-  const f=fixture(t),o=f.owner('orchestrator','idle');f.slots();
-  await f.agents.send('orchestrator',o.id,'Inspect and stop the authorized stuck task');
-  const resume=f.calls.find(call=>call.method==='thread/resume');
-  const turn=f.calls.find(call=>call.method==='turn/start');
-  assert.equal(resume?.params.sandbox,'danger-full-access');
-  assert.equal(turn?.params.sandboxPolicy.type,'dangerFullAccess');
-  assert.match(resume?.params.developerInstructions,/Never perform project implementation/);
-  assert.match(resume?.params.developerInstructions,/inspect and control Qahwa's own task runtimes/);
-});
-
-test('unacknowledged pause force-stops only the selected task controller',async t=>{
-  const root=mkdtempSync(join(tmpdir(),'qahwa-interrupt-'));
-  const config={host:'127.0.0.1',port:0,publicBaseUrl:'http://localhost',dataDir:root,backupDir:join(root,'backups'),sessionDays:365};
-  const db=new AppDatabase(config),tasks=new TaskService(db),attachments=new AttachmentService(db),agents=new AgentService(db,tasks,attachments);
-  t.after(()=>{agents.close();attachments.close();db.close();rmSync(root,{recursive:true,force:true});});
-  const firstRoot=join(root,'first'),otherRoot=join(root,'other');mkdirSync(firstRoot);mkdirSync(otherRoot);
-  const project=tasks.createProject({name:'Isolation',prefix:'ISO',rootDirectory:firstRoot},'user');
-  const otherProject=tasks.createProject({name:'Other worktree',prefix:'OTH',rootDirectory:otherRoot},'user');
-  const first=tasks.createTask({projectId:project.id,title:'Stuck task',status:'todo'},'user');
-  const queued=tasks.createTask({projectId:project.id,title:'Waiting for the lock',status:'todo'},'user');
-  const second=tasks.createTask({projectId:otherProject.id,title:'Other task',status:'todo'},'user');
-  agents.workspace('task',first.id);agents.workspace('task',queued.id);agents.workspace('task',second.id);
-  db.db.prepare("UPDATE agent_sessions SET intake_state='ready',access_mode='worktree-write' WHERE owner_type='task' AND owner_id=?").run(queued.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready',active_access_mode='worktree-write',active_root_directory=? WHERE owner_type='task' AND owner_id=?")
-    .run('thread-first','turn-first',firstRoot,first.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready',active_access_mode='worktree-write',active_root_directory=? WHERE owner_type='task' AND owner_id=?")
-    .run('thread-second','turn-second',otherRoot,second.id);
-  const runtimeFor=Reflect.get(agents,'runtimeForOwner').bind(agents);
-  const firstRuntime=runtimeFor('task',first.id),secondRuntime=runtimeFor('task',second.id);
-  assert.notEqual(firstRuntime,secondRuntime);
-  t.mock.method(firstRuntime,'initialize',async()=>{});
-  t.mock.method(firstRuntime,'request',async(method:string)=>{
-    if(method==='thread/read')return {thread:{status:{type:'active'}}};
-    if(method==='turn/interrupt')throw new Error('Codex request timed out');
-    return {};
-  });
-  let forced=0;
-  t.mock.method(firstRuntime,'forceStop',async()=>{forced++;});
-  t.mock.method(agents as any,'waitForRuntimeStop',async()=>false);
-  assert.match(agents.workspace('task',queued.id).session.accessReason!,/exclusive editing access/);
-  assert.equal(agents.capacity().activeTurns,2);
-  await agents.interrupt('task',first.id);
-  await agents.interrupt('task',first.id);
-  assert.equal(forced,1);
-  assert.equal(agents.workspace('task',first.id).session.runState,'interrupted');
-  assert.equal(agents.workspace('task',queued.id).session.accessReason,null);
-  assert.equal(agents.capacity().activeTurns,1);
-  assert.equal(agents.workspace('task',second.id).session.runState,'running');
-  assert.equal(agents.workspace('task',second.id).session.activeTurnId,'turn-second');
-});
-
-test('failed task force-stop and unverifiable orchestrator stop remain running',async t=>{
-  const f=fixture(t),task=f.owner('task','running');
-  f.db.db.prepare("UPDATE agent_sessions SET active_turn_id='task-turn' WHERE owner_id=?").run(task.id);
-  f.runtime.set(task.threadId,'active');
-  f.hook(async method=>{if(method==='turn/interrupt')throw new Error('Interrupt timed out');});
-  t.mock.method(f.agents as any,'waitForRuntimeStop',async()=>false);
-  t.mock.method(f.client,'forceStop',async()=>{throw new Error('Process group survived');});
-  await assert.rejects(f.agents.interrupt('task',task.id),/Process group survived/);
-  assert.equal(f.agents.workspace('task',task.id).session.runState,'running');
-  assert.equal(f.agents.workspace('task',task.id).session.activeTurnId,'task-turn');
-
-  const orchestrator=f.owner('orchestrator','running');
-  f.db.db.prepare("UPDATE agent_sessions SET active_turn_id='orchestrator-turn' WHERE owner_id='main'").run();
-  f.runtime.set(orchestrator.threadId,'active');
-  f.hook(async()=>{});
-  await assert.rejects(f.agents.interrupt('orchestrator',orchestrator.id),{code:'interrupt_not_verified'});
-  assert.equal(f.agents.workspace('orchestrator',orchestrator.id).session.runState,'running');
-  assert.equal(f.agents.workspace('orchestrator',orchestrator.id).session.activeTurnId,'orchestrator-turn');
-});
-
-test('isolated force-stop terminates the selected app-server process group and leaves its neighbor alive',async t=>{
-  const root=mkdtempSync(join(tmpdir(),'qahwa-force-stop-')),log=join(root,'processes.log');
-  writeFileSync(join(root,'codex'),`#!${process.execPath}
-const {spawn}=require('node:child_process'),fs=require('node:fs'),readline=require('node:readline');
-const worker=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
-fs.appendFileSync(process.env.QAH_FORCE_STOP_LOG,process.pid+':'+worker.pid+'\\n');
-readline.createInterface({input:process.stdin}).on('line',line=>{const request=JSON.parse(line);if(request.id!==undefined)process.stdout.write(JSON.stringify({id:request.id,result:{}})+'\\n');});
-setInterval(()=>{},1000);
-`,{mode:0o700});
-  const previousPath=process.env.PATH,previousLog=process.env.QAH_FORCE_STOP_LOG;
-  process.env.PATH=`${root}:${previousPath}`;process.env.QAH_FORCE_STOP_LOG=log;
-  const config={host:'127.0.0.1',port:0,publicBaseUrl:'http://localhost',dataDir:root,backupDir:join(root,'backups'),sessionDays:365};
-  const db=new AppDatabase(config),tasks=new TaskService(db),attachments=new AttachmentService(db),agents=new AgentService(db,tasks,attachments);
-  t.after(()=>{
-    agents.close();attachments.close();db.close();
-    if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;
-    if(previousLog===undefined)delete process.env.QAH_FORCE_STOP_LOG;else process.env.QAH_FORCE_STOP_LOG=previousLog;
-    rmSync(root,{recursive:true,force:true});
-  });
-  const project=tasks.createProject({name:'Process isolation',prefix:'PGI',rootDirectory:root},'user');
-  const first=tasks.createTask({projectId:project.id,title:'First runtime'},'user');
-  const second=tasks.createTask({projectId:project.id,title:'Second runtime'},'user');
-  const runtimeFor=Reflect.get(agents,'runtimeForOwner').bind(agents);
-  const firstRuntime=runtimeFor('task',first.id),secondRuntime=runtimeFor('task',second.id);
-  await Promise.all([firstRuntime.initialize(),secondRuntime.initialize()]);
-  const deadline=Date.now()+2_000;
-  while((!readFileSync(log,'utf8').trim()||readFileSync(log,'utf8').trim().split('\n').length<2)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
-  const records=readFileSync(log,'utf8').trim().split('\n').map(line=>line.split(':').map(Number));
-  const firstPid=Reflect.get(firstRuntime,'child').pid as number,secondPid=Reflect.get(secondRuntime,'child').pid as number;
-  const firstWorker=records.find(([pid])=>pid===firstPid)?.[1],secondWorker=records.find(([pid])=>pid===secondPid)?.[1];
-  const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
-  assert.ok(alive(firstPid!)&&alive(firstWorker!)&&alive(secondPid!)&&alive(secondWorker!));
-  await firstRuntime.forceStop(50);
-  assert.equal(alive(firstPid!),false);assert.equal(alive(firstWorker!),false);
-  assert.ok(alive(secondPid!)&&alive(secondWorker!));
-});
-
-test('leader exit keeps the task running until its surviving command child is terminated and verified',async t=>{
-  const root=mkdtempSync(join(tmpdir(),'qahwa-leader-exit-')),log=join(root,'processes.log'),count=join(root,'count');
-  writeFileSync(join(root,'codex'),`#!${process.execPath}
-const {spawn}=require('node:child_process'),fs=require('node:fs'),readline=require('node:readline');
-const countFile=process.env.QAH_LEADER_EXIT_COUNT,previous=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8')):0,index=previous+1;
-fs.writeFileSync(countFile,String(index));
-const workerCode=index===1?'const fs=require("node:fs");process.on("SIGTERM",()=>{});fs.writeFileSync(process.env.QAH_WORKER_READY,"1");setInterval(()=>{},1000)':'setInterval(()=>{},1000)';
-const workerReady=process.env.QAH_LEADER_EXIT_LOG+'.worker-'+index;
-const worker=spawn(process.execPath,['-e',workerCode],{stdio:'ignore',env:{...process.env,QAH_WORKER_READY:workerReady}});
-fs.appendFileSync(process.env.QAH_LEADER_EXIT_LOG,index+':'+process.pid+':'+worker.pid+'\\n');
-readline.createInterface({input:process.stdin}).on('line',line=>{
-  const request=JSON.parse(line);
-  if(request.id!==undefined)process.stdout.write(JSON.stringify({id:request.id,result:{}})+'\\n');
-  if(request.method==='initialized'&&index===1){const exitWhenReady=()=>fs.existsSync(workerReady)?setTimeout(()=>process.exit(0),25):setTimeout(exitWhenReady,5);exitWhenReady();}
-});
-setInterval(()=>{},1000);
-`,{mode:0o700});
-  const previousPath=process.env.PATH,previousLog=process.env.QAH_LEADER_EXIT_LOG,previousCount=process.env.QAH_LEADER_EXIT_COUNT;
-  process.env.PATH=`${root}:${previousPath}`;process.env.QAH_LEADER_EXIT_LOG=log;process.env.QAH_LEADER_EXIT_COUNT=count;
-  const config={host:'127.0.0.1',port:0,publicBaseUrl:'http://localhost',dataDir:root,backupDir:join(root,'backups'),sessionDays:365};
-  const db=new AppDatabase(config),tasks=new TaskService(db),attachments=new AttachmentService(db),agents=new AgentService(db,tasks,attachments);
-  t.after(()=>{
-    agents.close();attachments.close();db.close();
-    if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;
-    if(previousLog===undefined)delete process.env.QAH_LEADER_EXIT_LOG;else process.env.QAH_LEADER_EXIT_LOG=previousLog;
-    if(previousCount===undefined)delete process.env.QAH_LEADER_EXIT_COUNT;else process.env.QAH_LEADER_EXIT_COUNT=previousCount;
-    rmSync(root,{recursive:true,force:true});
-  });
-  const project=tasks.createProject({name:'Leader exit isolation',prefix:'LEX',rootDirectory:root},'user');
-  const first=tasks.createTask({projectId:project.id,title:'Leader exits'},'user');
-  const neighbor=tasks.createTask({projectId:project.id,title:'Neighbor remains'},'user');
-  agents.workspace('task',first.id);agents.workspace('task',neighbor.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready' WHERE owner_type='task' AND owner_id=?")
-    .run('thread-first','turn-first',first.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready' WHERE owner_type='task' AND owner_id=?")
-    .run('thread-neighbor','turn-neighbor',neighbor.id);
-  const runtimeFor=Reflect.get(agents,'runtimeForOwner').bind(agents);
-  const firstRuntime=runtimeFor('task',first.id),neighborRuntime=runtimeFor('task',neighbor.id);
-  await firstRuntime.initialize();await neighborRuntime.initialize();
-  const records=()=>readFileSync(log,'utf8').trim().split('\n').map(line=>line.split(':').map(Number));
-  const readyDeadline=Date.now()+2_000;
-  while((!readFileSync(log,'utf8').trim()||records().length<2)&&Date.now()<readyDeadline)await new Promise(resolve=>setTimeout(resolve,10));
-  const [firstIndex,firstPid,firstWorker]=records().find(([index])=>index===1)!;
-  const [,neighborPid,neighborWorker]=records().find(([index])=>index===2)!;
-  assert.equal(firstIndex,1);
-  const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
-  const leaderDeadline=Date.now()+1_000;
-  while(alive(firstPid)&&Date.now()<leaderDeadline)await new Promise(resolve=>setTimeout(resolve,10));
-  assert.equal(alive(firstPid),false);
-  assert.equal(alive(firstWorker),true);
-  assert.equal(agents.workspace('task',first.id).session.runState,'running');
-  assert.equal(agents.workspace('task',first.id).session.activeTurnId,'turn-first');
-  const cleanupDeadline=Date.now()+3_000;
-  while((alive(firstWorker)||agents.workspace('task',first.id).session.runState==='running')&&Date.now()<cleanupDeadline)await new Promise(resolve=>setTimeout(resolve,25));
-  assert.equal(alive(firstWorker),false);
-  assert.equal(agents.workspace('task',first.id).session.runState,'interrupted');
-  assert.equal(agents.workspace('task',first.id).session.activeTurnId,null);
-  assert.ok(alive(neighborPid)&&alive(neighborWorker));
-  assert.equal(agents.workspace('task',neighbor.id).session.runState,'running');
-  assert.equal(agents.workspace('task',neighbor.id).session.activeTurnId,'turn-neighbor');
-});
-
-test('failed leader cleanup retains the old process group for Pause retry without spawning or disturbing a neighbor',async t=>{
-  const root=mkdtempSync(join(tmpdir(),'qahwa-leader-retry-')),log=join(root,'processes.log'),count=join(root,'count');
-  writeFileSync(join(root,'codex'),`#!${process.execPath}
-const {spawn}=require('node:child_process'),fs=require('node:fs'),readline=require('node:readline');
-const countFile=process.env.QAH_LEADER_RETRY_COUNT,previous=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8')):0,index=previous+1;
-fs.writeFileSync(countFile,String(index));
-const workerCode=index===1?'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)':'setInterval(()=>{},1000)';
-const worker=spawn(process.execPath,['-e',workerCode],{stdio:'ignore'});
-fs.appendFileSync(process.env.QAH_LEADER_RETRY_LOG,index+':'+process.pid+':'+worker.pid+'\\n');
-readline.createInterface({input:process.stdin}).on('line',line=>{
-  const request=JSON.parse(line);
-  if(request.id!==undefined)process.stdout.write(JSON.stringify({id:request.id,result:{}})+'\\n');
-  if(request.method==='initialized'&&index===1)setTimeout(()=>process.exit(0),25);
-});
-setInterval(()=>{},1000);
-`,{mode:0o700});
-  const previousPath=process.env.PATH,previousLog=process.env.QAH_LEADER_RETRY_LOG,previousCount=process.env.QAH_LEADER_RETRY_COUNT;
-  process.env.PATH=`${root}:${previousPath}`;process.env.QAH_LEADER_RETRY_LOG=log;process.env.QAH_LEADER_RETRY_COUNT=count;
-  const config={host:'127.0.0.1',port:0,publicBaseUrl:'http://localhost',dataDir:root,backupDir:join(root,'backups'),sessionDays:365};
-  const db=new AppDatabase(config),tasks=new TaskService(db),attachments=new AttachmentService(db),agents=new AgentService(db,tasks,attachments);
-  t.after(()=>{
-    agents.close();attachments.close();db.close();
-    if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;
-    if(previousLog===undefined)delete process.env.QAH_LEADER_RETRY_LOG;else process.env.QAH_LEADER_RETRY_LOG=previousLog;
-    if(previousCount===undefined)delete process.env.QAH_LEADER_RETRY_COUNT;else process.env.QAH_LEADER_RETRY_COUNT=previousCount;
-    rmSync(root,{recursive:true,force:true});
-  });
-  const project=tasks.createProject({name:'Leader retry isolation',prefix:'LRI',rootDirectory:root},'user');
-  const first=tasks.createTask({projectId:project.id,title:'Retry old group'},'user');
-  const neighbor=tasks.createTask({projectId:project.id,title:'Unaffected neighbor'},'user');
-  agents.workspace('task',first.id);agents.workspace('task',neighbor.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready' WHERE owner_type='task' AND owner_id=?")
-    .run('thread-first','turn-first',first.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready' WHERE owner_type='task' AND owner_id=?")
-    .run('thread-neighbor','turn-neighbor',neighbor.id);
-  const runtimeFor=Reflect.get(agents,'runtimeForOwner').bind(agents);
-  const firstRuntime=runtimeFor('task',first.id),neighborRuntime=runtimeFor('task',neighbor.id);
-  const cleanup=t.mock.method(firstRuntime as any,'terminateProcessTree',async()=>{throw new Error('Simulated unverifiable survivor');});
-  await firstRuntime.initialize();await neighborRuntime.initialize();
-  const records=()=>readFileSync(log,'utf8').trim().split('\n').map(line=>line.split(':').map(Number));
-  const readyDeadline=Date.now()+2_000;
-  while((!readFileSync(log,'utf8').trim()||records().length<2)&&Date.now()<readyDeadline)await new Promise(resolve=>setTimeout(resolve,10));
-  const [,firstPid,firstWorker]=records().find(([index])=>index===1)!;
-  const [,neighborPid,neighborWorker]=records().find(([index])=>index===2)!;
-  const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
-  const failureDeadline=Date.now()+1_000;
-  while((alive(firstPid)||!agents.workspace('task',first.id).session.lastError)&&Date.now()<failureDeadline)await new Promise(resolve=>setTimeout(resolve,10));
-  assert.equal(alive(firstPid),false);
-  assert.equal(alive(firstWorker),true);
-  assert.equal(agents.workspace('task',first.id).session.runState,'running');
-  assert.equal(agents.workspace('task',first.id).session.activeTurnId,'turn-first');
-  assert.match(agents.workspace('task',first.id).session.lastError!,/unverifiable survivor/i);
-  assert.equal(readFileSync(count,'utf8'),'2');
-  cleanup.mock.restore();
-  await agents.interrupt('task',first.id);
-  assert.equal(alive(firstWorker),false);
-  assert.equal(agents.workspace('task',first.id).session.runState,'interrupted');
-  assert.equal(agents.workspace('task',first.id).session.activeTurnId,null);
-  assert.equal(readFileSync(count,'utf8'),'2');
-  assert.ok(alive(neighborPid)&&alive(neighborWorker));
-  assert.equal(agents.workspace('task',neighbor.id).session.runState,'running');
-  assert.equal(agents.workspace('task',neighbor.id).session.activeTurnId,'turn-neighbor');
-});
-
-test('failed direct Pause clears its latch and retries the retained group without spawning or disturbing a neighbor',async t=>{
-  const root=mkdtempSync(join(tmpdir(),'qahwa-direct-retry-')),log=join(root,'processes.log'),count=join(root,'count');
-  writeFileSync(join(root,'codex'),`#!${process.execPath}
-const {spawn}=require('node:child_process'),fs=require('node:fs'),readline=require('node:readline');
-const countFile=process.env.QAH_DIRECT_RETRY_COUNT,previous=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8')):0,index=previous+1;
-fs.writeFileSync(countFile,String(index));
-const workerCode=index===1?'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)':'setInterval(()=>{},1000)';
-const worker=spawn(process.execPath,['-e',workerCode],{stdio:'ignore'});
-fs.appendFileSync(process.env.QAH_DIRECT_RETRY_LOG,index+':'+process.pid+':'+worker.pid+'\\n');
-readline.createInterface({input:process.stdin}).on('line',line=>{const request=JSON.parse(line);if(request.id!==undefined)process.stdout.write(JSON.stringify({id:request.id,result:{}})+'\\n');});
-setInterval(()=>{},1000);
-`,{mode:0o700});
-  const previousPath=process.env.PATH,previousLog=process.env.QAH_DIRECT_RETRY_LOG,previousCount=process.env.QAH_DIRECT_RETRY_COUNT;
-  process.env.PATH=`${root}:${previousPath}`;process.env.QAH_DIRECT_RETRY_LOG=log;process.env.QAH_DIRECT_RETRY_COUNT=count;
-  const config={host:'127.0.0.1',port:0,publicBaseUrl:'http://localhost',dataDir:root,backupDir:join(root,'backups'),sessionDays:365};
-  const db=new AppDatabase(config),tasks=new TaskService(db),attachments=new AttachmentService(db),agents=new AgentService(db,tasks,attachments);
-  t.after(async()=>{
-    await agents.close().catch(()=>undefined);attachments.close();db.close();
-    if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;
-    if(previousLog===undefined)delete process.env.QAH_DIRECT_RETRY_LOG;else process.env.QAH_DIRECT_RETRY_LOG=previousLog;
-    if(previousCount===undefined)delete process.env.QAH_DIRECT_RETRY_COUNT;else process.env.QAH_DIRECT_RETRY_COUNT=previousCount;
-    rmSync(root,{recursive:true,force:true});
-  });
-  const project=tasks.createProject({name:'Direct Pause retry',prefix:'DPR',rootDirectory:root},'user');
-  const first=tasks.createTask({projectId:project.id,title:'Failed direct Pause'},'user');
-  const neighbor=tasks.createTask({projectId:project.id,title:'Neighbor stays alive'},'user');
-  agents.workspace('task',first.id);agents.workspace('task',neighbor.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready' WHERE owner_type='task' AND owner_id=?")
-    .run('thread-first','turn-first',first.id);
-  db.db.prepare("UPDATE agent_sessions SET thread_id=?,active_turn_id=?,run_state='running',intake_state='ready' WHERE owner_type='task' AND owner_id=?")
-    .run('thread-neighbor','turn-neighbor',neighbor.id);
-  const runtimeFor=Reflect.get(agents,'runtimeForOwner').bind(agents);
-  const firstRuntime=runtimeFor('task',first.id),neighborRuntime=runtimeFor('task',neighbor.id);
-  await firstRuntime.initialize();await neighborRuntime.initialize();
-  const records=()=>readFileSync(log,'utf8').trim().split('\n').map(line=>line.split(':').map(Number));
-  const readyDeadline=Date.now()+2_000;
-  while((!readFileSync(log,'utf8').trim()||records().length<2)&&Date.now()<readyDeadline)await new Promise(resolve=>setTimeout(resolve,10));
-  const [,firstPid,firstWorker]=records().find(([index])=>index===1)!;
-  const [,neighborPid,neighborWorker]=records().find(([index])=>index===2)!;
-  const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
-  t.mock.method(agents as any,'waitForRuntimeStop',async()=>false);
-  const leader=Reflect.get(firstRuntime,'child');
-  const failedStop=t.mock.method(firstRuntime as any,'terminateProcessTree',async()=>{
-    const exited=leader.exitCode!==null||leader.signalCode!==null?Promise.resolve():new Promise<void>(resolve=>leader.once('exit',()=>resolve()));
-    leader.kill('SIGKILL');await exited;
-    throw new Error('Simulated direct Pause verification failure');
-  });
-  await assert.rejects(agents.interrupt('task',first.id),/direct Pause verification failure/);
-  assert.equal(alive(firstPid),false);assert.equal(alive(firstWorker),true);
-  assert.equal(agents.workspace('task',first.id).session.runState,'running');
-  assert.equal(agents.workspace('task',first.id).session.activeTurnId,'turn-first');
-  assert.match(agents.workspace('task',first.id).session.lastError!,/direct Pause verification failure/i);
-  assert.equal(Reflect.get(firstRuntime,'forceStopChild'),null);
-  assert.equal(Reflect.get(firstRuntime,'child'),null);
-  assert.equal(readFileSync(count,'utf8'),'2');
-  failedStop.mock.restore();
-  await agents.interrupt('task',first.id);
-  assert.equal(alive(firstWorker),false);
-  assert.equal(agents.workspace('task',first.id).session.runState,'interrupted');
-  assert.equal(readFileSync(count,'utf8'),'2');
-  assert.ok(alive(neighborPid)&&alive(neighborWorker));
-  assert.equal(agents.workspace('task',neighbor.id).session.runState,'running');
-});
-
-test('application shutdown escalates and verifies every detached task process group before clearing runtimes',async t=>{
-  const root=mkdtempSync(join(tmpdir(),'qahwa-shutdown-groups-')),log=join(root,'processes.log'),count=join(root,'count');
-  writeFileSync(join(root,'codex'),`#!${process.execPath}
-const {spawn}=require('node:child_process'),fs=require('node:fs'),readline=require('node:readline');
-const countFile=process.env.QAH_SHUTDOWN_COUNT,previous=fs.existsSync(countFile)?Number(fs.readFileSync(countFile,'utf8')):0,index=previous+1;
-fs.writeFileSync(countFile,String(index));
-const workerCode=index===1?'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)':'setInterval(()=>{},1000)';
-const worker=spawn(process.execPath,['-e',workerCode],{stdio:'ignore'});
-fs.appendFileSync(process.env.QAH_SHUTDOWN_LOG,index+':'+process.pid+':'+worker.pid+'\\n');
-readline.createInterface({input:process.stdin}).on('line',line=>{const request=JSON.parse(line);if(request.id!==undefined)process.stdout.write(JSON.stringify({id:request.id,result:{}})+'\\n');});
-setInterval(()=>{},1000);
-`,{mode:0o700});
-  const previousPath=process.env.PATH,previousLog=process.env.QAH_SHUTDOWN_LOG,previousCount=process.env.QAH_SHUTDOWN_COUNT;
-  process.env.PATH=`${root}:${previousPath}`;process.env.QAH_SHUTDOWN_LOG=log;process.env.QAH_SHUTDOWN_COUNT=count;
-  const config={host:'127.0.0.1',port:0,publicBaseUrl:'http://localhost',dataDir:root,backupDir:join(root,'backups'),sessionDays:365};
-  const db=new AppDatabase(config),tasks=new TaskService(db),attachments=new AttachmentService(db),agents=new AgentService(db,tasks,attachments);
-  t.after(async()=>{
-    await agents.close().catch(()=>undefined);attachments.close();db.close();
-    if(previousPath===undefined)delete process.env.PATH;else process.env.PATH=previousPath;
-    if(previousLog===undefined)delete process.env.QAH_SHUTDOWN_LOG;else process.env.QAH_SHUTDOWN_LOG=previousLog;
-    if(previousCount===undefined)delete process.env.QAH_SHUTDOWN_COUNT;else process.env.QAH_SHUTDOWN_COUNT=previousCount;
-    rmSync(root,{recursive:true,force:true});
-  });
-  const project=tasks.createProject({name:'Shutdown groups',prefix:'SDG',rootDirectory:root},'user');
-  const first=tasks.createTask({projectId:project.id,title:'TERM resistant child'},'user');
-  const second=tasks.createTask({projectId:project.id,title:'Normal child'},'user');
-  const runtimeFor=Reflect.get(agents,'runtimeForOwner').bind(agents);
-  const firstRuntime=runtimeFor('task',first.id),secondRuntime=runtimeFor('task',second.id);
-  await firstRuntime.initialize();await secondRuntime.initialize();
-  const records=()=>readFileSync(log,'utf8').trim().split('\n').map(line=>line.split(':').map(Number));
-  const readyDeadline=Date.now()+2_000;
-  while((!readFileSync(log,'utf8').trim()||records().length<2)&&Date.now()<readyDeadline)await new Promise(resolve=>setTimeout(resolve,10));
-  const processes=records().flatMap(([,leader,worker])=>[leader,worker]);
-  const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
-  assert.ok(processes.every(alive));
-  await agents.close();
-  assert.ok(processes.every(pid=>!alive(pid)));
-  assert.equal(Reflect.get(firstRuntime,'processGroupId'),null);
-  assert.equal(Reflect.get(secondRuntime,'processGroupId'),null);
-  assert.equal(Reflect.get(firstRuntime,'child'),null);
-  assert.equal(Reflect.get(secondRuntime,'child'),null);
-  assert.equal(Reflect.get(agents,'taskCodex').size,0);
-});
-
 test('late interrupt acknowledgement cannot clear a newer queued turn',async t=>{
   const f=fixture(t),o=f.owner('task','running');
-  f.runtime.set(o.threadId,'active');
   f.db.db.prepare("UPDATE agent_sessions SET active_turn_id='old-turn' WHERE owner_id=?").run(o.id);
   const entered=deferred(),finish=deferred();
   f.hook(async method=>{if(method==='turn/interrupt'){entered.resolve();await finish.promise;}});

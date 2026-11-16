@@ -170,9 +170,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     assert.equal(records.filter(record => record.method === "initialize").length, 1, "Concurrent initialization is shared");
     const starts = records.filter(record => record.method === "thread/start");
     assert.equal(starts.length, 2);
-    const orchestratorStart = starts.find(record => !record.params.ephemeral);
-    assert.equal(orchestratorStart.params.sandbox, "danger-full-access", "The orchestrator has operational runtime access");
-    assert.match(orchestratorStart.params.developerInstructions, /Never perform project implementation/);
+    assert.equal(starts.find(record => !record.params.ephemeral).params.sandbox, "danger-full-access");
     assert.equal(starts.find(record => record.params.ephemeral).params.sandbox, "read-only");
     assert.equal(records.some(record => record.method === "turn/interrupt" && record.params.threadId === workspace.session.threadId), false);
     assert.equal((database.db.prepare("SELECT COUNT(*) AS count FROM agent_sessions WHERE owner_type = 'task' AND thread_id IS NOT NULL").get() as { count: number }).count, 0);

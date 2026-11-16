@@ -64,9 +64,6 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   const tasks = new TaskService(database);
   const attachments = new AttachmentService(database, join(root, "attachments"));
   const agents = new AgentService(database, tasks, attachments);
-  // Model selection is transport-agnostic; keep this fixture on one fake
-  // controller so process-isolation behavior stays in session-resources tests.
-  Reflect.set(agents, "runtimeForOwner", () => Reflect.get(agents, "codex"));
   return {
     root, database, tasks, agents, config: { host: "127.0.0.1", port: 3022, publicBaseUrl: "http://localhost", dataDir: root, backupDir: join(root, "backups"), sessionDays: 365 },
     reply(body: string) { writeFileSync(response, body); },

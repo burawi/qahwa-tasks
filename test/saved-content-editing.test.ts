@@ -40,7 +40,6 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
   let gate: Promise<void> | undefined, reject = false, initializeGate: Promise<void> | undefined;
   const requests: Array<{ method: string; params: any }> = [];
   const client = Reflect.get(agents, "codex");
-  t.mock.method(agents as any, "runtimeForOwner", () => client);
   t.mock.method(client, "initialize", async () => { await initializeGate; });
   t.mock.method(client, "request", async (method: string, params: unknown) => {
     requests.push({ method, params });

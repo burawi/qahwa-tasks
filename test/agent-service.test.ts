@@ -1,21 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, isolatedSupervisorEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
+import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementationHandoff, hasCurrentUserAuthorization, hasStandingDirectiveAuthorization, isolatedCodexEnvironment, parseAgentEnvelope, projectWorkActivities, recommendedParallelism } from "../src/server/agent-service.js";
 import { readFileSync } from "node:fs";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
-  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true,"reviewerId":"member-1","reviewMessage":"Re-review the corrected dashboard","validation":["Typecheck passed"],"limitations":["Not deployed"],"artifacts":["artifacts/dashboard.png"]} -->`);
+  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
   assert.equal(response.body, "Implemented the dashboard.");
   assert.equal(response.message, "Implemented");
   assert.equal(response.tone, "green");
   assert.equal(response.surface, "design");
   assert.equal(response.design?.artboard.width, 390);
   assert.equal(response.review, true);
-  assert.equal(response.reviewerId, "member-1");
-  assert.equal(response.reviewMessage, "Re-review the corrected dashboard");
-  assert.deepEqual(response.reviewEvidence, {
-    validation: ["Typecheck passed"], limitations: ["Not deployed"], artifacts: ["artifacts/dashboard.png"],
-  });
   assert.deepEqual(response.startTasks, ["WAS-0012"]);
   assert.deepEqual(response.priorityTasks, ["WAS-0012", "QAH-0004"]);
 });
@@ -45,36 +40,13 @@ test("agent envelope extracts intake, silent supervision, and structured orchest
   ]);
 });
 
-test("review envelopes preserve authority boundaries and explicit user resolutions", () => {
-  const review = parseAgentEnvelope(`Needs a user choice.
-<!-- qahwa-management-review:{"decision":"waiting_for_user","feedback":"Add unrelated billing work","decisionRequired":"Authorize or reject billing work","responsibleOwner":"Product owner"} -->
-<!-- qahwa-actions:[{"type":"task_review_resolution","reviewId":"review-1","resolution":"authorize","message":"Authorize billing work","authorization":"Authorize billing work"}] -->`);
-  assert.deepEqual(review.managementReview, {
-    decision: "waiting_for_user", feedback: "Add unrelated billing work",
-    decisionRequired: "Authorize or reject billing work", responsibleOwner: "Product owner",
-  });
-  assert.deepEqual(review.actions, [{
-    type: "task_review_resolution", reviewId: "review-1", resolution: "authorize",
-    message: "Authorize billing work", authorization: "Authorize billing work",
-  }]);
-  assert.equal(review.body, "Needs a user choice.");
-});
-
 test("spawned Codex sessions cannot inherit Orca routing or parent session identity", () => {
   const environment = isolatedCodexEnvironment({
     PATH: "/bin", ORCA_TAB_ID: "orca-tab", ORCA_AGENT_HOOK_TOKEN: "secret",
     JCODE_RUNTIME_DIR: "/tmp/jcode", CODEX_SESSION_ID: "parent", CODEX_THREAD_ID: "thread",
-    CODEX_TOOL_CALL_ID: "call", INVOCATION_ID: "invocation", SAFE_SETTING: "kept",
+    CODEX_TOOL_CALL_ID: "call", INVOCATION_ID: "invocation",
   });
-  assert.deepEqual(environment, { PATH: "/bin", SAFE_SETTING: "kept" });
-});
-
-test("supervisor Codex sessions cannot inherit credentials", () => {
-  const environment = isolatedSupervisorEnvironment({
-    PATH: "/bin", ORCA_TAB_ID: "orca-tab", CLOUDFLARE_API_TOKEN: "cloud-secret",
-    SERVICE_PASSWORD: "password", CONNECTOR_CREDENTIAL_FILE: "/private/credential", SAFE_SETTING: "kept",
-  });
-  assert.deepEqual(environment, { PATH: "/bin", SAFE_SETTING: "kept" });
+  assert.deepEqual(environment, { PATH: "/bin" });
 });
 
 test("orchestrator actions require evidence from the current user turn, not keyword interpretation", () => {

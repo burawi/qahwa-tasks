@@ -32,7 +32,6 @@ function fixture(t: TestContext) {
   const createAgents = () => {
     agents = new FixtureAgents(db, tasks, attachments);
     const codex = Reflect.get(agents, "codex");
-    t.mock.method(agents as any, "runtimeForOwner", () => codex);
     t.mock.method(codex, "initialize", async () => {});
     t.mock.method(codex, "request", async (method:string, params:any) => {
       requests.push({method,params});
@@ -62,9 +61,9 @@ function fixture(t: TestContext) {
     idle(taskId:string) { db.db.prepare("UPDATE agent_sessions SET run_state='idle',active_turn_id=NULL,starting_message_id=NULL WHERE owner_id=?").run(taskId); },
     queued(): any[] { return Reflect.get(agents,"queuedMessages").call(agents); },
     turns() { return requests.filter(r=>r.method==="turn/start"); },
-    async restart() { await agents.close(); attachments.close(); db.close(); db=new AppDatabase(config); tasks=new TaskService(db); attachments=new AttachmentService(db); createAgents(); },
+    restart() { agents.close(); attachments.close(); db.close(); db=new AppDatabase(config); tasks=new TaskService(db); attachments=new AttachmentService(db); createAgents(); },
   };
-  t.after(async()=>{await agents.close();attachments.close();db.close();rmSync(root,{recursive:true,force:true});});
+  t.after(async()=>{agents.close();await new Promise(resolve=>setImmediate(resolve));attachments.close();db.close();rmSync(root,{recursive:true,force:true});});
   return f;
 }
 
@@ -171,17 +170,12 @@ test("respects canonical shared and nested worktrees across separate projects",a
 
 test("future follow-ups do not block immediate messages; due ones respect existing FIFO and stale dispatch",async t=>{
   const f=fixture(t), task=f.task(), s=f.save(task.id);
-  const waitForTurns=async(count:number)=>{const deadline=Date.now()+1_000;while(f.turns().length<count){assert.ok(Date.now()<deadline,"Queued message did not start");await new Promise(resolve=>setImmediate(resolve));}};
   const pending=(await f.agents.send("task",task.id,"Earlier immediate message")).messages.at(-1)!;
   assert.equal(f.queued()[0].id,pending.id);
   f.due(s.messageId);f.release(s.messageId,pending.id);f.slots(2);
   assert.equal(await f.start(s.messageId),false,"Cannot jump over an earlier saved message");
-  await f.drain();await waitForTurns(1);
-  assert.equal(f.turns().length,1,JSON.stringify({queued:f.queued(),requests:f.requests,session:f.agents.workspace("task",task.id).session}));
-  assert.match(f.turns()[0].params.input[0].text,/Earlier immediate message/);
-  f.idle(task.id);await f.drain();await waitForTurns(2);
-  assert.equal(f.turns().length,2,JSON.stringify({queued:f.queued(),requests:f.requests,session:f.agents.workspace("task",task.id).session,schedule:f.agents.messageSchedules.get(s.messageId)}));
-  assert.match(f.turns()[1].params.input[0].text,/Check the result tomorrow/);
+  await f.drain();assert.match(f.turns()[0].params.input[0].text,/Earlier immediate message/);
+  f.idle(task.id);await f.drain();assert.match(f.turns()[1].params.input[0].text,/Check the result tomorrow/);
 });
 
 test("editing an overdue pending body works; moving its time revokes queued dispatch",async t=>{
@@ -227,7 +221,7 @@ test("reservation blocks stale edit/remove; concurrent drains cannot duplicate d
 for(const method of ["thread/resume","turn/start"]) test(`uncertain ${method} is never retried and never creates a replacement conversation`,async t=>{
   const f=fixture(t), task=f.task(), s=f.save(task.id);f.due(s.messageId);f.release(s.messageId);f.slots(2);f.failure(method);
   await f.drain();assert.equal(f.agents.messageSchedules.get(s.messageId)?.state,"interrupted");
-  f.failure(null);f.idle(task.id);await f.drain();await f.restart();await f.drain();
+  f.failure(null);f.idle(task.id);await f.drain();f.restart();await f.drain();
   assert.equal(f.requests.filter(r=>r.method===method).length,1);
   assert.equal(f.requests.some(r=>r.method==="thread/start"),false);
   assert.equal(f.agents.workspace("task",task.id).session.threadId,`saved-${task.id}`);
@@ -237,18 +231,18 @@ test("restart retains pending absolute times, skips expired windows and suppress
   const f=fixture(t), task=f.task(), future=f.save(task.id), waiting=f.save(task.id), missed=f.save(task.id,input("Missed","skip_if_missed")), uncertain=f.save(task.id);
   f.due(waiting.messageId,-120_000);f.due(missed.messageId,-60_001);f.due(uncertain.messageId);
   f.agents.messageSchedules.reserve(uncertain.messageId,1);
-  await f.restart();
+  f.restart();
   assert.equal(f.agents.messageSchedules.get(future.messageId)?.runAt,future.runAt);
   assert.equal(f.agents.messageSchedules.get(uncertain.messageId)?.state,"interrupted");
   assert.equal(f.agents.messageSchedules.get(missed.messageId)?.state,"skipped");
   assert.equal(f.agents.messageSchedules.get(waiting.messageId)?.state,"pending");
   await new Promise(resolve=>setImmediate(resolve));f.release(waiting.messageId);f.slots(2);await f.drain();assert.equal(f.turns().length,1);
   assert.equal(f.agents.messageSchedules.get(waiting.messageId)?.state,"delivered");
-  await f.restart();await f.drain();assert.equal(f.turns().length,1);
+  f.restart();await f.drain();assert.equal(f.turns().length,1);
 });
 
 test("authenticated schedule routes guard stale writes, wrong chats and polling revisions",async t=>{
-  const f=fixture(t), task=f.task();await f.agents.close();
+  const f=fixture(t), task=f.task();f.agents.close();
   const app=await buildApp(f.config,f.db,{generateTitle:async()=>"Title"});
   t.after(()=>app.close());
   const now=new Date().toISOString();
@@ -334,7 +328,7 @@ test("schedule edits, delivery, cancellation and restart preserve prior attachme
   const before=f.agents.workspace("task",task.id), comments=f.tasks.getTask(task.id).comments;
   const a=f.save(task.id), b=f.save(task.id);
   f.agents.saveFollowup(task.id,a.messageId,{...input("Revised"),expectedVersion:1});f.agents.cancelFollowup(task.id,a.messageId,2);
-  f.due(b.messageId);f.release(b.messageId);f.slots(2);await f.drain();await f.restart();
+  f.due(b.messageId);f.release(b.messageId);f.slots(2);await f.drain();f.restart();
   const after=f.agents.workspace("task",task.id);
   assert.deepEqual(after.messages.find(m=>m.id==="old-history"),before.messages[0]);
   assert.deepEqual(after.designPages,before.designPages);assert.equal(after.selectedDesignPageId,page);
@@ -359,7 +353,7 @@ test("restart during the actual RPC reservation clears startup ownership without
   const f=fixture(t), task=f.task(), s=f.save(task.id);f.due(s.messageId);f.release(s.messageId);f.slots(2);
   let release!:()=>void;f.gate(new Promise<void>(r=>release=r));const pending=f.drain();
   while(!f.turns().length) await new Promise(r=>setImmediate(r));
-  f.slots(0);await f.restart();
+  f.slots(0);f.restart();
   assert.equal(f.agents.messageSchedules.get(s.messageId)?.state,"interrupted");
   assert.equal(f.agents.workspace("task",task.id).session.runState,"interrupted");
   assert.equal(f.db.db.prepare("SELECT starting_message_id FROM agent_sessions WHERE owner_id=?").get(task.id).starting_message_id,null);

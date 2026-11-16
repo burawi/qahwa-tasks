@@ -25,7 +25,6 @@ import { OrchestratorAvatar } from "./OrchestratorAvatar";
 import { DesignCanvas, type CanvasSelectionContext } from "./DesignCanvas";
 import { DesignChatSheet } from "./DesignChatSheet";
 import { ChatExcerptSelection, ExcerptPreview } from "./ChatExcerptSelection";
-import { RunningIndicator } from "./RunningIndicator";
 
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 const MAX_MESSAGE_ATTACHMENT_BYTES = 250 * 1024 * 1024;
@@ -264,8 +263,6 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
     finally { setBusy(false); }
   };
   const running = workspace?.session.runState === "running" || workspace?.session.runState === "waiting";
-  const workflowOwnsActivity = mode === "task" && task?.workflow
-    && (task.workflow.state === "reviewing" || task.workflow.state === "capacity_queued");
   const sessionStateLabel = workspace?.session.intakeState === "pending" && workspace.session.runState !== "not_started"
     ? "Clarifying scope" : workspace?.session.runState === "not_started" ? "Not started" : workspace?.session.runState;
   const cancelMessage = useCallback(async (messageId: string) => {
@@ -379,13 +376,9 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
         <strong>{mode === "task" ? task?.title ?? "Loading…" : "Portfolio coordination"}</strong>
         <small className="session-subtitle">
           <span className="session-subtitle-text">{mode === "task" ? task?.projectName ?? "" : "A calm view across every task"}</span>
-          {workspace && !workflowOwnsActivity && <><span className="session-state-separator" aria-hidden="true">·</span><span className={`session-state run-${workspace.session.runState}`} role="status">{sessionStateLabel}</span></>}
-          {mode === "task" && task && <><span className="session-state-separator" aria-hidden="true">·</span><span className="session-task-status" title={task.workflow ? `${task.workflow.owner}: ${task.workflow.nextAction}` : undefined}>{task.workflow?.label ?? task.status.replaceAll("_", " ")}</span></>}
+          {workspace && <><span className="session-state-separator" aria-hidden="true">·</span><span className={`session-state run-${workspace.session.runState}`} role="status">{sessionStateLabel}</span></>}
+          {mode === "task" && task && <><span className="session-state-separator" aria-hidden="true">·</span><span className="session-task-status">{task.status.replaceAll("_", " ")}</span></>}
         </small>
-        {mode === "task" && task?.workflow && <small className="session-workflow-next" title={task.workflow.blocker ?? undefined}>
-          <span className="workflow-owner"><b>{task.workflow.owner}</b>{task.workflow.ownerActive && <RunningIndicator running label={`${task.workflow.owner} is actively preparing review feedback`} />}</span>
-          <span aria-hidden="true"> · </span>{task.workflow.nextAction}
-        </small>}
       </div>
       {mode === "task" && <CodexUsageIndicator />}
       {mode === "orchestrator" && capacity && <span className="capacity-pill"><i />{capacity.activeTurns} active <b>·</b> {capacity.availableSlots} available</span>}

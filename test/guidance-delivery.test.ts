@@ -38,7 +38,7 @@ test("steering requires the intended active turn and one durable message; both c
     assert.equal(pending(f, receipt(f, task.id).messageId), undefined);
     assert.deepEqual(f.workspace().messages.at(-1)!.guidanceDeliveries, [receipt(f, task.id)]);
     assert.notEqual(workspacePoll(f.workspace(), cursor).messagesRevision, cursor.messagesRevision);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("the transport fixture rejects a missing expectedTurnId instead of accepting invalid steering", async () => {
@@ -46,7 +46,7 @@ test("the transport fixture rejects a missing expectedTurnId instead of acceptin
   try {
     await Reflect.get(f.agents, "codex").initialize();
     await assert.rejects(Reflect.get(f.agents, "codex").request("turn/steer", { threadId: "thread", input: [] }), /missing field expectedTurnId/);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 for (const state of ["running", "waiting"] as const) {
@@ -65,7 +65,7 @@ for (const state of ["running", "waiting"] as const) {
       await until(() => receipt(f, task.id).status === "delivered", "Retained guidance never started");
       assert.equal(f.requests().filter(r => r.method === "turn/start").length, 2);
       assert.equal(messages(f, task.id).length, 2);
-    } finally { await f.close(); }
+    } finally { f.close(); }
   });
 }
 
@@ -86,7 +86,7 @@ for (const currentTurnId of [null, "replacement-turn"]) {
       assert.equal(receipt(f, task.id).messageId, id);
       assert.equal(messages(f, task.id).length, 2);
       assert.equal(f.requests().filter(r => r.method === "turn/start").length, 2);
-    } finally { await f.close(); }
+    } finally { f.close(); }
   });
 }
 
@@ -104,7 +104,7 @@ test("an accepted steer acknowledgement remains delivered when its turn finishes
     assert.equal(receipt(f, task.id).turnId, intended);
     await drain(f);
     assert.equal(f.requests().filter(r => r.method === "turn/start").length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("a definitely rejected request is failed, retained across restart, and never automatically retried", async () => {
@@ -117,13 +117,13 @@ test("a definitely rejected request is failed, retained across restart, and neve
     assert.equal(receipt(f, task.id).uncertain, false);
     assert.match(receipt(f, task.id).detail, /Saved; request rejected/);
     const saved = receipt(f, task.id);
-    await f.restart();
+    f.restart();
     await drain(f);
     assert.deepEqual(receipt(f, task.id), saved);
     assert.ok(pending(f, saved.messageId));
     assert.equal(f.requests().filter(r => r.method === "turn/steer").length, 1);
     assert.equal(f.requests().filter(r => r.method === "turn/start").length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 for (const settings of [{ disconnect: true }, { ackTurnId: "wrong-turn" }, { reject: "turn/steer", rejectCode: -32603 }]) {
@@ -136,13 +136,13 @@ for (const settings of [{ disconnect: true }, { ackTurnId: "wrong-turn" }, { rej
       assert.equal((await guide(f, task.id)).status, "failed");
       assert.equal(receipt(f, task.id).uncertain, true);
       const id = receipt(f, task.id).messageId;
-      await f.restart();
+      f.restart();
       await f.reply(envelope([{ type: "dispatch", messageIds: [id], authorization }]), authorization);
       await until(() => f.assistants().at(-1)?.body.includes("Guidance delivery is uncertain") ?? false, "Uncertain retry was not blocked");
       assert.equal(receipt(f, task.id).status, "failed");
       assert.ok(pending(f, id));
       assert.equal(f.requests().filter(r => r.method === "turn/steer").length, 1);
-    } finally { await f.close(); }
+    } finally { f.close(); }
   });
 }
 
@@ -158,7 +158,7 @@ test("replaying the same guidance action cannot duplicate execution or the saved
     assert.equal((await guide(f, task.id, "stable-action")).status, "applied");
     assert.equal(messages(f, task.id).length, 2);
     assert.equal(f.requests().filter(r => r.method === "turn/steer").length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("queued guidance survives restart and is delivered exactly once with a new turn", async () => {
@@ -168,14 +168,14 @@ test("queued guidance survives restart and is delivered exactly once with a new 
     f.agents.limit = 0;
     assert.equal((await guide(f, task.id)).status, "queued");
     const saved = receipt(f, task.id).messageId;
-    await f.restart();
+    f.restart();
     await drain(f);
     assert.equal(receipt(f, task.id).status, "delivered");
     assert.equal(receipt(f, task.id).messageId, saved);
     await drain(f);
     assert.equal(f.requests().filter(r => r.method === "turn/start").length, 1);
     assert.equal(messages(f, task.id).length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 for (const phase of ["steer", "start"] as const) {
@@ -186,13 +186,13 @@ for (const phase of ["steer", "start"] as const) {
       f.agents.limit = 0;
       await guide(f, task.id);
       f.database.db.prepare("UPDATE guidance_deliveries SET phase=? WHERE task_id=?").run(phase, task.id);
-      await f.restart();
+      f.restart();
       await drain(f);
       assert.equal(receipt(f, task.id).status, "failed");
       assert.equal(receipt(f, task.id).uncertain, true);
       assert.ok(pending(f, receipt(f, task.id).messageId));
       assert.equal(f.requests().filter(r => r.method === "turn/start").length, 0);
-    } finally { await f.close(); }
+    } finally { f.close(); }
   });
 }
 
@@ -215,7 +215,7 @@ test("new-turn rejection retains guidance and waits for explicit retry of that s
     await until(() => receipt(f, task.id).status === "delivered", "Retry was not delivered");
     assert.equal(receipt(f, task.id).messageId, id);
     assert.equal(messages(f, task.id).length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 for (const eventTurn of ["intended", "different"]) {
@@ -235,7 +235,7 @@ for (const eventTurn of ["intended", "different"]) {
       assert.equal(Boolean(pending(f, id)), eventTurn !== "intended");
       await drain(f);
       assert.equal(f.requests().filter(r => r.method === "turn/steer").length, 1);
-    } finally { await f.close(); }
+    } finally { f.close(); }
   });
 }
 
@@ -248,7 +248,7 @@ test("a turn-start disconnect retains guidance as uncertain and never starts it 
     assert.equal(receipt(f, task.id).uncertain, true);
     await drain(f);
     assert.equal(f.requests().filter(r => r.method === "turn/start").length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("failure before turn/start is retained without claiming an ambiguous delivery", async () => {
@@ -260,7 +260,7 @@ test("failure before turn/start is retained without claiming an ambiguous delive
     assert.equal(receipt(f, task.id).uncertain, false);
     assert.ok(pending(f, receipt(f, task.id).messageId));
     assert.equal(f.requests().some(r => r.method === "turn/start"), false);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("a protocol schema rejection is failed rather than mistaken for an ended turn", async () => {
@@ -272,7 +272,7 @@ test("a protocol schema rejection is failed rather than mistaken for an ended tu
     assert.equal((await guide(f, task.id)).status, "failed");
     assert.equal(receipt(f, task.id).uncertain, false);
     assert.match(receipt(f, task.id).detail, /request rejected/);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("legacy guidance text is shown as saved and unconfirmed without being replayed", async () => {
@@ -286,7 +286,7 @@ test("legacy guidance text is shown as saved and unconfirmed without being repla
     assert.equal(pending(f, id), undefined);
     await drain(f);
     assert.equal(f.requests().length, 0);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });
 
 test("a queued guidance receipt updates the original orchestrator reply after later delivery", async () => {
@@ -306,5 +306,5 @@ test("a queued guidance receipt updates the original orchestrator reply after la
     assert.match(after.body, /receipt shows its current status/);
     assert.doesNotMatch(after.body, /is saved and waiting/);
     assert.equal(messages(f, task.id).length, 1);
-  } finally { await f.close(); }
+  } finally { f.close(); }
 });

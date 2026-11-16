@@ -22,7 +22,6 @@ function fixture(t: TestContext) {
   let slots = 0, reject = false, gate: Promise<void> | undefined;
   const requests: string[] = [];
   const client = Reflect.get(agents, "codex");
-  t.mock.method(agents as any, "runtimeForOwner", () => client);
   t.mock.method(client, "initialize", async () => {});
   t.mock.method(client, "request", async (method: string) => {
     requests.push(method);

@@ -30,7 +30,6 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
   const neighbor = tasks.createTask({ projectId: project.id, title: "Neighbor", status: "todo" }, "user");
   const attachments = new AttachmentService(database, join(root, "files"));
   const agents = new AgentService(database, tasks, attachments);
-  clearInterval(Reflect.get(agents, "scheduleTimer"));
   const ownerId = ownerType === "task" ? task.id : "main";
   agents.workspace(ownerType, ownerId);
   // Queue user control messages too, without invoking a real Codex process.
@@ -38,7 +37,6 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
   let gate: Promise<void> | undefined, reject = false, initializeGate: Promise<void> | undefined;
   const requests: Array<{ method: string; params: any }> = [];
   const client = Reflect.get(agents, "codex");
-  t.mock.method(agents as any, "runtimeForOwner", () => client);
   t.mock.method(client, "initialize", async () => { await initializeGate; });
   t.mock.method(client, "request", async (method: string, params: unknown) => {
     requests.push({ method, params });
@@ -62,7 +60,7 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
     start: (id: string): Promise<boolean> => Reflect.get(agents, "startSavedMessage").call(agents, id),
     actions: (actions: unknown[], quote?: string): Promise<any[]> => Reflect.get(agents, "applyOrchestratorActions").call(agents, actions, quote),
   };
-  t.after(async () => { await agents.close(); attachments.close(); database.close(); rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { agents.close(); attachments.close(); database.close(); rmSync(root, { recursive: true, force: true }); });
   return f;
 }
 
@@ -90,7 +88,7 @@ for (const ownerType of ["task", "orchestrator"] as const) {
     const expiry = f.database.db.prepare("SELECT expires_at AS expiry FROM attachment_uploads WHERE id = ?").get(file.id) as { expiry: string };
     assert.ok(Date.parse(expiry.expiry) >= Date.now() + ATTACHMENT_LIMITS.completedMs - 1500);
     assert.notEqual(workspacePoll(f.workspace(), {}).messagesRevision, originalPoll.messagesRevision);
-    await f.agents.close();
+    f.agents.close();
     const reopenedDb = new AppDatabase(f.config), reopenedFiles = new AttachmentService(reopenedDb, join(f.root, "reopened-files"));
     const reopened = new AgentService(reopenedDb, new TaskService(reopenedDb), reopenedFiles);
     try {
@@ -98,7 +96,7 @@ for (const ownerType of ["task", "orchestrator"] as const) {
       assert.equal(message.cancelledAt, saved.cancelledAt); assert.equal(message.pending, false);
       assert.equal(await Reflect.get(reopened, "startSavedMessage").call(reopened, cancelled.id), false);
       assert.equal(reopenedFiles.resolveDownload(ownerType, f.ownerId, file.id).attachment.filename, "context.txt");
-    } finally { await reopened.close(); reopenedFiles.close(); reopenedDb.close(); }
+    } finally { reopened.close(); reopenedFiles.close(); reopenedDb.close(); }
     assert.deepEqual(f.requests, []);
   });
 
@@ -241,7 +239,7 @@ test("cancelled task history is excluded from both implementation handoff paths"
 });
 
 test("authenticated cancellation endpoints validate origin and canonical chat ownership", async t => {
-  const f = fixture(t, "task"); await f.agents.close();
+  const f = fixture(t, "task"); f.agents.close();
   const timestamp = new Date().toISOString();
   f.database.db.prepare("INSERT INTO paired_devices (id, name, public_key, created_at, last_seen_at) VALUES ('device', 'Test', '', ?, ?)").run(timestamp, timestamp);
   const token = new AuthService(f.database, 365).createSession("test", "127.0.0.1", "device").token;
@@ -266,13 +264,13 @@ test("authenticated cancellation endpoints validate origin and canonical chat ow
   } finally { await app.close(); }
 });
 
-test("existing message/session databases migrate without losing history", async t => {
-  const f = fixture(t, "task"); await f.agents.close();
+test("existing message/session databases migrate without losing history", t => {
+  const f = fixture(t, "task"); f.agents.close();
   f.database.db.prepare("INSERT INTO chat_messages (id, owner_type, owner_id, role, body, created_at) VALUES ('legacy', 'task', ?, 'user', 'Retain history', ?)").run(f.ownerId, new Date().toISOString());
   f.database.db.exec("ALTER TABLE chat_messages DROP COLUMN cancelled_at; ALTER TABLE agent_sessions DROP COLUMN starting_message_id");
   const reopened = new AppDatabase(f.config);
   try {
     assert.deepEqual(reopened.db.prepare("SELECT body, cancelled_at FROM chat_messages WHERE id = 'legacy'").get(), { body: "Retain history", cancelled_at: null });
     assert.equal((reopened.db.prepare("SELECT starting_message_id FROM agent_sessions WHERE owner_id = ?").get(f.ownerId) as any).starting_message_id, null);
-  } finally { await reopened.close(); }
+  } finally { reopened.close(); }
 });

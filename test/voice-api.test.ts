@@ -9,7 +9,6 @@ import { VoiceService } from "../src/server/voice-service.js";
 import { AuthService } from "../src/server/auth.js";
 import { AppDatabase } from "../src/server/database.js";
 import { TaskService } from "../src/server/task-service.js";
-import { TeamService } from "../src/server/team-service.js";
 import { voiceWav } from "./helpers/voice.js";
 
 async function fixture() {
@@ -25,23 +24,21 @@ async function fixture() {
   const tasks = new TaskService(database);
   const project = tasks.createProject({ name: "Voice", prefix: "VOC", rootDirectory: root }, "user");
   const task = tasks.createTask({ projectId: project.id, title: "Voice message", status: "todo" }, "user");
-  const team = new TeamService(database);
-  const meeting = team.createMeeting({ title: "Voice meeting", participantIds: team.availableParticipants().map(participant => `${participant.type}:${participant.id}`) });
   const model = join(dataDir, "model.bin"); writeFileSync(model, "fake model");
   const voice = new VoiceService({ cli: process.execPath, model, run: async (_command, args) => {
     if (args.includes("-otxt")) await writeFile(`${args[args.indexOf("-of") + 1]}.txt`, "Editable voice transcript");
     else await writeFile(args.at(-1)!, voiceWav());
   } });
   const app = await buildApp(config, database, { voice });
-  return { app, headers, other, task, meeting, database };
+  return { app, headers, other, task, database };
 }
 
-test("task, orchestrator, and meeting chats transcribe only owned complete uploads without sending a message", async () => {
-  const { app, headers, other, task, meeting, database } = await fixture();
+test("both chats transcribe only owned complete uploads without sending a message", async () => {
+  const { app, headers, other, task, database } = await fixture();
   try {
     assert.equal((await app.inject({ url: "/api/voice-transcriptions/availability" })).statusCode, 401);
     assert.equal((await app.inject({ url: "/api/voice-transcriptions/availability", headers })).json().available, true);
-    for (const base of [`/api/tasks/${task.id}`, "/api/orchestrator", `/api/meetings/${meeting.id}`]) {
+    for (const base of [`/api/tasks/${task.id}`, "/api/orchestrator"]) {
       const create = await app.inject({ method: "POST", url: `${base}/attachments`, headers, payload: { filename: "voice.webm", mediaType: "audio/webm", size: 3 } });
       assert.equal(create.statusCode, 201, create.body);
       const id = create.json().attachment.id;

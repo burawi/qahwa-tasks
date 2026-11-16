@@ -1,17 +1,5 @@
 .session-header .session-subtitle { flex-wrap: wrap; row-gap: 2px; }
 .session-header .session-task-status { flex: none; color: var(--muted); font-size: inherit; font-weight: 600; letter-spacing: 0; text-transform: capitalize; }
-.session-header > .session-title .session-workflow-next { display: block; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; font-weight: 500; line-height: 1.35; letter-spacing: 0; text-transform: none; white-space: normal; }
-.session-header .session-workflow-next b { color: var(--text); font-weight: 650; }
-.workflow-owner { display: inline-flex; min-width: 0; align-items: center; gap: 2px; vertical-align: middle; }
-.workflow-owner .running-indicator { flex-basis: 20px; width: 20px; height: 14px; }
-.workflow-owner .running-indicator > span { width: 3px; height: 3px; flex-basis: 3px; }
-@media (max-width: 420px) {
-  .workflow-owner { max-width: min(45vw, 180px); }
-  .workflow-owner b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-}
-@media (min-width: 700px) {
-  .session-header > .session-title .session-workflow-next { font-size: 12px; }
-}
 .chat-session .session-actions .chat-model-indicator { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 36px; margin-right: auto; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 11px; }
 .chat-model-indicator > svg { flex: none; width: 14px; height: 14px; }
 .chat-model-indicator > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

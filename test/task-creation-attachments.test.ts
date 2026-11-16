@@ -169,7 +169,6 @@ test("intake and a fresh implementation thread both receive saved files and nati
     return {};
   } };
   Reflect.set(agents, "codex", fake);
-  Reflect.set(agents, "runtimeForOwner", () => fake);
   Reflect.set(agents, "resumeQueues", async () => {});
   try {
     const files = [f.file(), f.file("reference.png", Buffer.from("image"))];
