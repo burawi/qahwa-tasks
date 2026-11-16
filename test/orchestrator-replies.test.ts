@@ -214,6 +214,63 @@ test("an overloaded main orchestrator rolls into a fresh thread without losing h
   } finally { await f.close(); }
 });
 
+test("an overloaded task rolls over after completion and continues in a fresh preserved session", async () => {
+  const f = coordinationFixture();
+  try {
+    const task = f.task("Complete the release verification");
+    await f.agents.send("task", task.id, "Run the release verification");
+    const before = f.agents.workspace("task", task.id).session;
+    assert.ok(before.threadId && before.activeTurnId);
+    f.emit([
+      { method: "thread/tokenUsage/updated", params: { threadId: before.threadId, turnId: before.activeTurnId,
+        tokenUsage: { total: { totalTokens: 2_000_000 }, last: { totalTokens: 72_000 }, modelContextWindow: 100_000 } } },
+      { method: "turn/completed", params: { threadId: before.threadId,
+        turn: { id: before.activeTurnId, status: "completed" } } },
+    ]);
+    await until(() => f.agents.workspace("task", task.id).session.generation === before.generation + 1,
+      "Task context did not roll over");
+    const rolled = f.agents.workspace("task", task.id);
+    assert.equal(rolled.session.threadId, null);
+    assert.equal(rolled.messages.some(message => message.metadata?.contextRollover === true), true);
+    await f.agents.send("task", task.id, "Continue the preserved release verification");
+    const continued = f.agents.workspace("task", task.id).session;
+    assert.ok(continued.threadId && continued.threadId !== before.threadId);
+    assert.equal(f.requests().some(request => request.method === "thread/archive" && request.params.threadId === before.threadId), true);
+  } finally { await f.close(); }
+});
+
+test("restart rotates an overloaded failed task context and safely retries guidance that timed out before acceptance", async () => {
+  const f = coordinationFixture();
+  try {
+    const task = f.task("Verify the replacement runtime");
+    await f.agents.send("task", task.id, "Prepare release verification");
+    const before = f.agents.workspace("task", task.id).session;
+    assert.ok(before.threadId && before.activeTurnId);
+    const now = new Date().toISOString();
+    f.database.db.prepare(`INSERT INTO session_events(owner_type,owner_id,thread_id,turn_id,event_type,payload_json,created_at)
+      VALUES ('task',?,?,?,'thread/tokenUsage/updated',?,?)`).run(task.id, before.threadId, before.activeTurnId,
+      JSON.stringify({ threadId: before.threadId, turnId: before.activeTurnId, payload: { tokenUsage: {
+        total: { totalTokens: 3_000_000 }, last: { totalTokens: 75_000 }, modelContextWindow: 100_000,
+      } } }), now);
+    const messageId = (f.agents as any).addMessage("task", task.id, "system", "Labib guidance authorized by the user: verify the replacement runtime");
+    f.database.db.prepare(`INSERT INTO guidance_deliveries(message_id,action_key,task_id,status,phase,detail,updated_at)
+      VALUES (?,?,?,'failed','queued','Saved. Codex request timed out; request was not accepted. Guidance is retained for explicit retry.',?)`)
+      .run(messageId, `timed-out-${messageId}`, task.id, now);
+    f.database.db.prepare("INSERT INTO pending_messages(message_id,dispatch_order) VALUES (?,1)").run(messageId);
+    f.database.db.prepare(`UPDATE agent_sessions SET active_turn_id=NULL,run_state='failed',last_error='Codex request timed out'
+      WHERE owner_type='task' AND owner_id=?`).run(task.id);
+    await f.restart();
+    await until(() => f.agents.workspace("task", task.id).session.generation === before.generation + 1,
+      "Restart did not rotate the overloaded task context");
+    await until(() => f.agents.guidance.get(messageId)?.status === "delivered",
+      "Undelivered timed-out guidance was not retried in the fresh context");
+    const recovered = f.agents.workspace("task", task.id);
+    assert.ok(recovered.session.threadId && recovered.session.threadId !== before.threadId);
+    assert.equal(recovered.session.runState, "running");
+    assert.equal(recovered.messages.some(message => message.metadata?.recoveredAfterTimeout === true), true);
+  } finally { await f.close(); }
+});
+
 test("ordinary replies without actions and silent replies keep their existing behavior", async () => {
   for (const silent of [true, false]) {
     const f = coordinationFixture();

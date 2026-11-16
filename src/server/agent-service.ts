@@ -98,7 +98,7 @@ type TaskReviewerContext = {
 
 type OrchestratorOutcome = { status: "applied" | "queued" | "failed"; message: string };
 
-const MAIN_ORCHESTRATOR_ROLLOVER_RATIO = 0.75;
+const CONTEXT_ROLLOVER_RATIO = 0.70;
 
 export function appendAttachmentPaths(text: string, attachments: Array<Pick<PreparedAttachment, "id" | "filename" | "mediaType" | "size" | "path">>): string {
   if (!attachments.length) return text;
@@ -885,6 +885,7 @@ export class AgentService {
       WHERE run_state IN ('running','waiting')
     `).run(restartedAt);
     this.recoverLegacySelfDeploys(restartedAt);
+    this.recoverOverloadedTaskContexts(restartedAt);
     const rows = this.database.db.prepare("SELECT thread_id, owner_type, owner_id FROM agent_sessions WHERE thread_id IS NOT NULL")
       .all() as Array<{ thread_id: string; owner_type: SessionOwnerType; owner_id: string }>;
     for (const row of rows) this.threadOwners.set(row.thread_id, { ownerType: row.owner_type, ownerId: row.owner_id });
@@ -1136,6 +1137,34 @@ export class AgentService {
       this.database.db.prepare(`UPDATE agent_sessions SET run_state = 'idle', active_turn_id = NULL,
         last_error = NULL, updated_at = ? WHERE owner_type = 'task' AND owner_id = ?`).run(recoveredAt, ownerId);
       this.setPresence(ownerId, "Deployed", "green", "The service restarted successfully after the deployment build");
+    }
+  }
+
+  private recoverOverloadedTaskContexts(recoveredAt: string): void {
+    const sessions = this.database.db.prepare(`SELECT s.* FROM agent_sessions s
+      JOIN tasks t ON t.id=s.owner_id
+      WHERE s.owner_type='task' AND s.thread_id IS NOT NULL AND s.active_turn_id IS NULL
+        AND s.run_state NOT IN ('running','waiting') AND t.status!='closed'`).all() as SessionRow[];
+    for (const row of sessions) {
+      if (!row.thread_id || !this.contextOverloaded("task", row.owner_id, row.thread_id)) continue;
+      this.database.db.transaction(() => {
+        const changed = this.database.db.prepare(`UPDATE agent_sessions
+          SET thread_id=NULL,generation=generation+1,
+            run_state=CASE WHEN last_error='Codex request timed out' THEN 'idle' ELSE run_state END,
+            last_error=CASE WHEN last_error='Codex request timed out' THEN NULL ELSE last_error END,updated_at=?
+          WHERE id=? AND thread_id=? AND generation=?`).run(recoveredAt, row.id, row.thread_id, row.generation);
+        if (!changed.changes) return;
+        const retried = this.database.db.prepare(`UPDATE guidance_deliveries
+          SET status='pending',phase='queued',detail='Saved. Retrying in a fresh task context after the previous context timed out.',
+            uncertain=0,thread_id=NULL,expected_turn_id=NULL,turn_id=NULL,updated_at=?
+          WHERE task_id=? AND status='failed' AND uncertain=0 AND detail LIKE 'Saved. Codex request timed out%'
+            AND message_id IN (SELECT message_id FROM pending_messages)`).run(recoveredAt, row.owner_id);
+        this.addMessage("task", row.owner_id, "system",
+          retried.changes
+            ? "The previous task context was full and timed out before accepting saved guidance. Started a fresh session and safely requeued that undelivered guidance."
+            : "Started a fresh task session because the previous context reached its safe capacity; saved task history and handoffs remain preserved.",
+          { contextRollover: true, previousThreadId: row.thread_id, recoveredAfterTimeout: Boolean(retried.changes) });
+      })();
     }
   }
 
@@ -2134,12 +2163,16 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     });
   }
 
-  private mainOrchestratorContextOverloaded(threadId: string, turnId: string | null): boolean {
-    if (!turnId) return false;
-    const row = this.database.db.prepare(`SELECT payload_json FROM session_events
-      WHERE owner_type='orchestrator' AND owner_id='main' AND thread_id=? AND turn_id=?
-        AND event_type='thread/tokenUsage/updated' ORDER BY id DESC LIMIT 1`)
-      .get(threadId, turnId) as { payload_json: string } | undefined;
+  private contextOverloaded(ownerType: SessionOwnerType, ownerId: string, threadId: string, turnId: string | null = null): boolean {
+    const row = turnId
+      ? this.database.db.prepare(`SELECT payload_json FROM session_events
+          WHERE owner_type=? AND owner_id=? AND thread_id=? AND turn_id=?
+            AND event_type='thread/tokenUsage/updated' ORDER BY id DESC LIMIT 1`)
+        .get(ownerType, ownerId, threadId, turnId) as { payload_json: string } | undefined
+      : this.database.db.prepare(`SELECT payload_json FROM session_events
+          WHERE owner_type=? AND owner_id=? AND thread_id=?
+            AND event_type='thread/tokenUsage/updated' ORDER BY id DESC LIMIT 1`)
+        .get(ownerType, ownerId, threadId) as { payload_json: string } | undefined;
     if (!row) return false;
     try {
       const tokenUsage = object(object(object(JSON.parse(row.payload_json)).payload).tokenUsage);
@@ -2147,12 +2180,12 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
       const used = Number(last.totalTokens ?? last.inputTokens ?? 0);
       const window = Number(tokenUsage.modelContextWindow ?? 0);
       return Number.isFinite(used) && Number.isFinite(window) && window > 0
-        && used / window >= MAIN_ORCHESTRATOR_ROLLOVER_RATIO;
+        && used / window >= CONTEXT_ROLLOVER_RATIO;
     } catch { return false; }
   }
 
   private rolloverMainOrchestratorContext(previous: AgentSession, runtime: CodexAppServer, threadId: string, turnId: string | null): boolean {
-    if (!this.mainOrchestratorContextOverloaded(threadId, turnId)) return false;
+    if (!turnId || !this.contextOverloaded("orchestrator", "main", threadId, turnId)) return false;
     const timestamp = isoNow();
     const changed = this.database.db.transaction(() => {
       const result = this.database.db.prepare(`UPDATE agent_sessions
@@ -2169,6 +2202,26 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     this.threadOwners.delete(threadId);
     void runtime.request("thread/archive", { threadId }).catch(() => undefined);
     this.orchestratorObservations.push("The previous orchestrator context reached its safe capacity and was rolled over. Re-evaluate unfinished authorized in-progress work now using the standing directive and recent delivered user instructions.");
+    return true;
+  }
+
+  private rolloverTaskContext(previous: AgentSession, runtime: CodexAppServer, threadId: string, turnId: string | null): boolean {
+    if (!turnId || !this.contextOverloaded("task", previous.ownerId, threadId, turnId)) return false;
+    const timestamp = isoNow();
+    const changed = this.database.db.transaction(() => {
+      const result = this.database.db.prepare(`UPDATE agent_sessions
+        SET thread_id=NULL,generation=generation+1,last_error=NULL,updated_at=?
+        WHERE owner_type='task' AND owner_id=? AND thread_id=? AND generation=? AND run_state='idle'`)
+        .run(timestamp, previous.ownerId, threadId, previous.generation);
+      if (!result.changes) return false;
+      this.addMessage("task", previous.ownerId, "system",
+        "Started a fresh task session to keep continuation reliable; the task charter, resolved intake, guidance, and saved chat remain preserved.",
+        { contextRollover: true, previousThreadId: threadId });
+      return true;
+    })();
+    if (!changed) return false;
+    this.threadOwners.delete(threadId);
+    void runtime.request("thread/archive", { threadId }).catch(() => undefined);
     return true;
   }
 
@@ -2252,6 +2305,9 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
       }
       if (owner.ownerType === "orchestrator" && owner.ownerId === "main" && state === "idle" && previous.threadId) {
         this.rolloverMainOrchestratorContext(previous, runtime, previous.threadId, turnId);
+      }
+      if (owner.ownerType === "task" && state === "idle" && previous.threadId) {
+        this.rolloverTaskContext(previous, runtime, previous.threadId, turnId);
       }
       if (notifyIdle) void this.idleNotifier?.completed(owner.ownerId, threadId!, turnId!).catch(() => undefined);
       if (owner.ownerType === "task" && state === "failed") {
