@@ -1258,16 +1258,17 @@ export class AgentService {
         AND participant_id=? AND status='delivered' LIMIT 1`).get(taskId, memberId));
   }
 
-  private async recoverClaimedReviewHandoffs(): Promise<void> {
+  private async recoverClaimedReviewHandoffs(taskId: string | null = null): Promise<void> {
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
     const events = this.database.db.prepare(`SELECT e.id,e.owner_id AS taskId,e.created_at AS createdAt,
       json_extract(e.payload_json,'$.payload.item.text') AS text
       FROM session_events e JOIN tasks t ON t.id=e.owner_id
       JOIN agent_sessions s ON s.owner_type='task' AND s.owner_id=t.id
       WHERE e.owner_type='task' AND e.event_type='item/completed' AND e.created_at>=?
+        AND (? IS NULL OR e.owner_id=?)
         AND json_extract(e.payload_json,'$.payload.item.type')='agentMessage'
         AND t.status='in_progress' AND s.run_state NOT IN ('running','waiting')
-      ORDER BY e.id DESC LIMIT 200`).all(cutoff) as Array<{ id: number; taskId: string; createdAt: string; text: string }>;
+      ORDER BY e.id DESC LIMIT 200`).all(cutoff, taskId, taskId) as Array<{ id: number; taskId: string; createdAt: string; text: string }>;
     const seen = new Set<string>();
     for (const event of events) {
       if (seen.has(event.taskId)) continue;
@@ -2415,6 +2416,16 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         && !this.database.db.prepare("SELECT 1 FROM pending_requests WHERE owner_type = 'task' AND owner_id = ? AND status = 'pending'").get(owner.ownerId);
       const state: SessionRunState = status === "completed" ? "idle" : status === "interrupted" ? "interrupted" : "failed";
       this.updateSession(owner.ownerType, owner.ownerId, { runState: state, activeTurnId: null, lastError: state === "failed" ? status : null });
+      if (owner.ownerType === "task" && state === "idle") {
+        // Do not wait for a process restart to repair an older/prose-only claim
+        // that corrected evidence was returned to an established reviewer.
+        // The recovery receipt and the durable dispatch make this idempotent.
+        void this.recoverClaimedReviewHandoffs(owner.ownerId).catch(error => {
+          const task = this.tasks.getTask(owner.ownerId);
+          this.orchestratorObservations.push(`Could not reconcile ${task.humanId}'s claimed review handoff: ${error instanceof Error ? error.message : String(error)}`);
+          this.scheduleOrchestratorObservation();
+        });
+      }
       // Completed/interrupted/failed turns can no longer answer their RPC requests.
       this.database.db.prepare("UPDATE pending_requests SET status='expired', resolved_at=? WHERE owner_type=? AND owner_id=? AND status='pending'")
         .run(isoNow(), owner.ownerType, owner.ownerId);

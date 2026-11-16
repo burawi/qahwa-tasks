@@ -310,7 +310,7 @@ test("task review marker routes a corrected result only to its established revie
   } finally { await f.close(); }
 });
 
-test("startup recovers a legacy prose-only claim that evidence was routed to an established reviewer", async () => {
+test("completed task turns immediately recover a legacy prose-only claim routed to an established reviewer", async () => {
   const f = coordinationFixture();
   try {
     const reviewer = f.agents.team.createMember({ name: "Maya", title: "Product Lead", instructions: "Review product journeys." });
@@ -325,16 +325,26 @@ test("startup recovers a legacy prose-only claim that evidence was routed to an 
     f.agents.team.completeDispatch(oldDispatch, oldResponse);
     writeFileSync(join(f.root, "legacy-proof.png"), Buffer.from("corrected evidence"));
     const text = `The corrected packet has been routed directly to Maya for explicit re-review.\n<!-- qahwa:{"message":"Maya re-review pending","tone":"blue","surface":"chat","review":false,"validation":["Navigation passed"],"limitations":["Not deployed"],"artifacts":["legacy-proof.png"]} -->`;
-    const eventId = Number(f.database.db.prepare(`INSERT INTO session_events
-      (owner_type,owner_id,event_type,payload_json,created_at) VALUES ('task',?,'item/completed',?,?)`)
-      .run(task.id, JSON.stringify({ payload: { item: { type: "agentMessage", text } } }), new Date().toISOString()).lastInsertRowid);
-    f.database.db.prepare(`INSERT INTO session_events
-      (owner_type,owner_id,event_type,payload_json,created_at) VALUES ('task',?,'item/completed',?,?)`)
-      .run(task.id, JSON.stringify({ payload: { item: { type: "agentMessage", text: "A later authorization-only turn." } } }),
-        new Date(Date.now() + 1).toISOString());
-
+    f.database.db.prepare(`UPDATE agent_sessions SET thread_id='legacy-thread',active_turn_id='legacy-turn',run_state='running'
+      WHERE owner_type='task' AND owner_id=?`).run(task.id);
+    const runtime = (f.agents as any).runtimeForOwner("task", task.id);
+    const emit = (message: unknown) => (f.agents as any).handleCodexMessage(message, runtime);
+    emit({ method: "item/completed", params: { threadId: "legacy-thread", turnId: "legacy-turn",
+      item: { id: "legacy-review-claim", type: "agentMessage", phase: "final_answer", text } } });
+    emit({ method: "item/completed", params: { threadId: "legacy-thread", turnId: "legacy-turn",
+      item: { id: "later-task-note", type: "agentMessage", phase: "final_answer", text: "A later authorization-only turn." } } });
+    emit({ method: "turn/completed", params: {
+      threadId: "legacy-thread", turn: { id: "legacy-turn", status: "completed" },
+    } });
+    await until(() => f.agents.workspace("task", task.id).session.runState === "idle",
+      "Completed legacy task turn did not settle");
+    await until(() => (f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, reviewer.id) as { count: number }).count === 2,
+    "Claimed review handoff was not reconciled when the task turn completed");
     await (f.agents as any).recoverClaimedReviewHandoffs();
-    await (f.agents as any).recoverClaimedReviewHandoffs();
+    const eventId = Number((f.database.db.prepare(`SELECT id FROM session_events
+      WHERE owner_type='task' AND owner_id=? AND event_type='item/completed'
+        AND json_extract(payload_json,'$.payload.item.id')='legacy-review-claim'`).get(task.id) as { id: number }).id);
     assert.equal(f.tasks.getTask(task.id).status, "in_review");
     assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
       WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, reviewer.id) as { count: number }).count, 2);
