@@ -213,6 +213,44 @@ test("restart recovers a recently returned legacy consultation that was copied w
   } finally { await f.close(); }
 });
 
+test("automated supervision can return an in-review legacy task only to its established reviewer", async () => {
+  const f = coordinationFixture();
+  try {
+    const quote = "Keep authorized work moving through its review loop";
+    f.database.setSetting("orchestrator_standing_directive", JSON.stringify({
+      id: "review-loop", instruction: "Supervise authorized tasks through review",
+      sourceQuote: quote, createdAt: new Date().toISOString(),
+    }));
+    const reviewer = f.agents.team.createMember({ name: "Maya", title: "Product Lead", instructions: "Review product journeys." });
+    const stranger = f.agents.team.createMember({ name: "Sami", title: "QA Lead", instructions: "Review quality." });
+    const task = f.task("Legacy product review");
+    f.tasks.transition(task.id, { to: "in_progress" }, "codex");
+    f.tasks.transition(task.id, { to: "in_review" }, "codex");
+    f.agents.limit = 0;
+    const traceId = (f.agents as any).addMessage("task", task.id, "system", "Maya reviewed the first result");
+    const dispatchId = f.agents.team.createDispatch(traceId, "task", task.id, f.agents.team.participant(reviewer));
+    const responseId = (f.agents as any).addMessage("task", task.id, "assistant", "One correction is required.");
+    f.agents.team.completeDispatch(dispatchId, responseId);
+
+    const repeated = await (f.agents as any).applyOrchestratorActions([{
+      type: "consult", memberId: reviewer.id, taskId: task.humanId,
+      message: "Re-review the corrected live evidence", authorization: quote,
+    }], undefined, null, "automated-review", null);
+    assert.equal(repeated[0]?.status, "queued");
+    assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, reviewer.id) as { count: number }).count, 2);
+
+    const unrelated = await (f.agents as any).applyOrchestratorActions([{
+      type: "consult", memberId: stranger.id, taskId: task.humanId,
+      message: "Join this review", authorization: quote,
+    }], undefined, null, "automated-new-reviewer", null);
+    assert.equal(unrelated[0]?.status, "failed");
+    assert.match(unrelated[0]!.message, /not authorized/i);
+    assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, stranger.id) as { count: number }).count, 0);
+  } finally { await f.close(); }
+});
+
 test("meeting replies use hidden meeting-only context and are copied into the durable transcript", async () => {
   const f = coordinationFixture();
   try {

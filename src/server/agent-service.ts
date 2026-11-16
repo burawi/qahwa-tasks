@@ -2717,6 +2717,21 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           && authorizingUserMessage === undefined && Boolean(directive)
           && this.tasks.getTask(action.taskId).status === "in_progress"
           && hasCurrentUserAuthorization(historicalUserConversation, action.authorization);
+        // Legacy review loops predate structured reviewer rows and therefore
+        // return to an already-used specialist through `consult`. Treat that
+        // re-review as continuation, not as a brand-new delegation, but only
+        // when the active directive is quoted exactly, the task is currently
+        // in review, and this same member has already returned advice for it.
+        // This deliberately does not authorize adding another reviewer or
+        // consulting on an unrelated/open-ended task.
+        const establishedReviewContinuation = action.type === "consult"
+          && authorizingUserMessage === undefined && Boolean(directive)
+          && hasCurrentUserAuthorization(directive?.sourceQuote, action.authorization)
+          && this.tasks.getTask(action.taskId).status === "in_review"
+          && Boolean(this.database.db.prepare(`SELECT 1 FROM team_dispatches
+            WHERE source_type='task' AND source_id=? AND participant_type='member'
+              AND participant_id=? AND status='delivered' LIMIT 1`)
+            .get(this.tasks.getTask(action.taskId).id, action.memberId));
         if (action.type === "directive") {
           if (!currentlyAuthorized) throw new Error("A standing directive must be authorized by the user in this conversation");
           if (action.enabled) {
@@ -2741,7 +2756,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
             "Creating a task needs an exact quote from the current user request or the applicable standing directive", "task_creation_authorization", 403);
           assertDomain((hasCurrentUserAuthorization(authorizingUserMessage, action.authorization) && authorizationMessageId) || (standingAuthorized && directive),
             "Task creation authorization source is unavailable", "task_creation_authorization", 403);
-        } else if (!currentlyAuthorized && !standingAuthorized && !historicallyAuthorizedContinuation) {
+        } else if (!currentlyAuthorized && !standingAuthorized && !historicallyAuthorizedContinuation && !establishedReviewContinuation) {
           throw new Error("The action was not authorized by the user conversation or the active standing directive");
         }
         if (action.type === "member_create") {
