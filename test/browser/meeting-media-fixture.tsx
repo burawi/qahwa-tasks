@@ -6,15 +6,22 @@ import "meeting-styles";
 
 const stamp = new Date().toISOString();
 const controls = window.meetingFixture = {
-  failSend: false, available: true, failTranscription: false, sent: [], removed: [], uploads: [], error: "", serial: 0,
+  failSend: false, available: true, failTranscription: false, sent: [], removed: [], uploads: [], error: "", errors: [], serial: 0,
+  meetingCalls: [], failMeetingIds: [],
   meeting: { id: "meeting-1", title: "Release readiness", status: "active", participants: [], latestMessage: null, createdAt: stamp, updatedAt: stamp },
+  otherMeeting: { id: "meeting-2", title: "Product direction", status: "active", participants: [], latestMessage: null, createdAt: stamp, updatedAt: stamp },
   messages: [{ id: "history-1", meetingId: "meeting-1", speakerType: "user", speakerId: null, speakerName: "You", speakerTitle: "",
     body: "Earlier evidence", attachments: [{ id: "expired-1", filename: "old-plan.txt", mediaType: "text/plain", size: 12,
       status: "expired", previewUrl: "/api/meetings/meeting-1/attachments/expired-1" }], createdAt: stamp }],
 };
 Object.assign(api, {
-  meetings: async () => ({ meetings: [structuredClone(controls.meeting)] }),
-  meeting: async () => ({ meeting: structuredClone(controls.meeting), messages: structuredClone(controls.messages) }),
+  meetings: async () => ({ meetings: [structuredClone(controls.meeting), structuredClone(controls.otherMeeting)] }),
+  meeting: async id => {
+    controls.meetingCalls.push(id);
+    if (controls.failMeetingIds.includes(id)) throw new Error(`Could not load ${id}`);
+    const meeting = id === controls.otherMeeting.id ? controls.otherMeeting : controls.meeting;
+    return { meeting: structuredClone(meeting), messages: id === controls.meeting.id ? structuredClone(controls.messages) : [] };
+  },
   archiveMeeting: async () => ({ meeting: { ...controls.meeting, status: "archived" } }),
   sendMeetingMessage: async (_id, text, attachmentIds, requestId) => {
     controls.sent.push({ text, attachmentIds: [...attachmentIds], requestId });
@@ -43,4 +50,4 @@ Object.assign(api, {
   teamParticipants: async () => ({ participants: [] }),
 });
 
-createRoot(document.getElementById("root")).render(<MeetingsPage connected onError={message => { controls.error = message; }} />);
+createRoot(document.getElementById("root")).render(<MeetingsPage connected onError={message => { controls.error = message; controls.errors.push(message); }} />);

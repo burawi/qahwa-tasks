@@ -100,6 +100,10 @@ test("meeting composer source exposes attachment-only, microphone, retry, and ac
   assert.match(source, /aria-label="Voice transcript"/);
   assert.match(source, /\(!text && !ready\.length\)/);
   assert.match(source, /attemptRef/);
+  assert.match(source, /addEventListener\("popstate", syncFromPath\)/);
+  assert.match(source, /removeEventListener\("popstate", syncFromPath\)/);
+  assert.match(source, /<MeetingChat key=\{selected\} id=\{selected\}/);
+  assert.match(source, /loadErrorRef\.current !== detail/);
   assert.match(source, /role="region" aria-label="Files to send"/);
   assert.match(source, /metadata: message\.attachments\.length \? \{ attachments: message\.attachments \}/);
 });

@@ -29,6 +29,11 @@ export function MeetingsPage({ connected, onError }: { connected: boolean; onErr
   const [creating, setCreating] = useState(false);
   const load = async () => setMeetings((await api.meetings()).meetings);
   useEffect(() => {
+    const syncFromPath = () => setSelected(meetingFromPath());
+    window.addEventListener("popstate", syncFromPath);
+    return () => window.removeEventListener("popstate", syncFromPath);
+  }, []);
+  useEffect(() => {
     if (!connected) return;
     let stopped = false; let timer = 0;
     const poll = async () => {
@@ -50,7 +55,7 @@ export function MeetingsPage({ connected, onError }: { connected: boolean; onErr
       {!meetings.length && <div className="empty-state refined-empty"><span><MessagesSquare /></span><h2>No meetings yet</h2><p>Start a focused channel with the full team or a smaller group.</p><button className="primary" onClick={() => setCreating(true)}><CalendarPlus />Start a meeting</button></div>}
     </main>
     {creating && <CreateMeeting connected={connected} onClose={() => setCreating(false)} onCreated={meeting => { setCreating(false); setMeetings(current => [meeting, ...current]); open(meeting); }} onError={onError} />}
-    {selected && <MeetingChat id={selected} connected={connected} onClose={close} onError={onError} />}
+    {selected && <MeetingChat key={selected} id={selected} connected={connected} onClose={close} onError={onError} />}
   </>;
 }
 
@@ -77,6 +82,7 @@ function MeetingChat({ id, connected, onClose, onError }: { id: string; connecte
   const sendingRef = useRef(false);
   const attachmentsRef = useRef<ComposerAttachment[]>([]);
   const attemptRef = useRef<{ id: string; text: string; attachmentIds: string[] } | null>(null);
+  const loadErrorRef = useRef<string | null>(null);
   const voice = useVoiceMessage("meeting", id);
 
   useEffect(() => { if (message) localStorage.setItem(`qahwa-meeting-draft:${id}`, message); else localStorage.removeItem(`qahwa-meeting-draft:${id}`); }, [id, message]);
@@ -86,8 +92,11 @@ function MeetingChat({ id, connected, onClose, onError }: { id: string; connecte
     if (!connected) return;
     let stopped = false; let timer = 0;
     const poll = async () => {
-      try { const result = await api.meeting(id); if (!stopped) { setMeeting(result.meeting); setMessages(result.messages); } }
-      catch (error) { if (!stopped && !meeting) onError(error instanceof Error ? error.message : "Could not load meeting"); }
+      try { const result = await api.meeting(id); if (!stopped) { loadErrorRef.current = null; setMeeting(result.meeting); setMessages(result.messages); } }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : "Could not load meeting";
+        if (!stopped && loadErrorRef.current !== detail) { loadErrorRef.current = detail; onError(detail); }
+      }
       if (!stopped) timer = window.setTimeout(() => void poll(), 1600);
     };
     void poll();
