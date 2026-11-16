@@ -83,7 +83,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   };
 }
 
-test("new and resumed orchestrators retain coordination context while worktree execution stays blocked", async () => {
+test("new and resumed orchestrators retain coordination context with operational runtime access", async () => {
   const f = fixture();
   try {
     const project = f.tasks.createProject({ name: "Empty project", prefix: "EMP", rootDirectory: f.root }, "user");
@@ -96,11 +96,11 @@ test("new and resumed orchestrators retain coordination context while worktree e
     assert.deepEqual(requests[0]?.argv, ["app-server"]);
     for (const method of ["thread/start", "thread/resume"]) {
       const request = requests.find((item) => item.method === method)!;
-      assert.equal(request.params.sandbox, "read-only");
+      assert.equal(request.params.sandbox, "danger-full-access");
       assert.equal(request.params.approvalPolicy, "never");
       assert.equal(request.params.approvalsReviewer, "user");
       assert.match(request.params.developerInstructions, /portfolio orchestrator/);
-      assert.match(request.params.developerInstructions, /Never perform task work or mutate project worktrees/);
+      assert.match(request.params.developerInstructions, /Never perform project implementation/);
       assert.doesNotMatch(request.params.developerInstructions, /use only the documented hidden action envelope/);
     }
     const turn = requests.find((item) => item.method === "turn/start")!;

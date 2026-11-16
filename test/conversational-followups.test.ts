@@ -23,6 +23,7 @@ async function fixture(t: TestContext) {
   class Agents extends AgentService { override capacity(){return {activeTurns:0,availableSlots:slots,recommendedParallelism:slots} as any;} }
   const agents=new Agents(db,tasks,attachments),requests:{method:string;params:any}[]=[];
   const codex=Reflect.get(agents,"codex");
+  t.mock.method(agents as any,"runtimeForOwner",()=>codex);
   t.mock.method(codex,"initialize",async()=>{});
   t.mock.method(codex,"request",async(method:string,params:any)=>{requests.push({method,params});return method==="turn/start"?{turn:{id:`turn-${++sequence}`}}:{};});
   const project=tasks.createProject({name:"Chat scheduling",prefix:"CHAT",rootDirectory:root},"user");

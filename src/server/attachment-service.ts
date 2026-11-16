@@ -2,7 +2,7 @@ import { mkdirSync, openSync, closeSync, appendFileSync, statSync, existsSync, r
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DomainError, assertDomain } from "../domain/errors.js";
-import type { ChatAttachment, ChatMessage, SessionOwnerType } from "../domain/types.js";
+import type { ChatAttachment, ChatMessage, MeetingMessage, SessionOwnerType } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
 
 export const ATTACHMENT_LIMITS = {
@@ -22,6 +22,7 @@ interface AttachmentRow {
   owner_id: string;
   device_id: string;
   message_id: string | null;
+  meeting_message_id: string | null;
   filename: string;
   media_type: string;
   declared_size: number;
@@ -37,6 +38,7 @@ interface AttachmentRow {
 export interface PreparedAttachment extends ChatAttachment { path: string }
 
 const now = () => new Date().toISOString();
+export const meetingAttachmentOwnerId = (meetingId: string) => `meeting:${meetingId}`;
 
 function safeFilename(value: string): string {
   const filename = value.trim();
@@ -107,7 +109,7 @@ export class AttachmentService {
 
   remove(id: string, deviceId: string): void {
     const row = this.ownedUpload(id, deviceId);
-    assertDomain(!row.message_id, "Sent attachments cannot be removed from history", "attachment_in_use", 409);
+    assertDomain(!row.message_id && !row.meeting_message_id, "Sent attachments cannot be removed from history", "attachment_in_use", 409);
     this.removeFiles(id);
     this.database.db.prepare("DELETE FROM attachment_uploads WHERE id = ?").run(id);
   }
@@ -117,7 +119,8 @@ export class AttachmentService {
     assertDomain(uniqueIds.length === ids.length, "Attachment identifiers must be unique", "invalid_attachments");
     const rows = uniqueIds.map((id) => this.database.db.prepare("SELECT * FROM attachment_uploads WHERE id = ?").get(id) as AttachmentRow | undefined);
     assertDomain(rows.every((row): row is AttachmentRow => Boolean(row && row.owner_type === ownerType && row.owner_id === ownerId && row.device_id === deviceId)), "Attachment does not belong to this chat session", "attachment_forbidden", 403);
-    assertDomain(rows.every((row) => row.status === "complete" && !row.message_id && existsSync(this.filePath(row.id))), "Attachment is incomplete or expired", "attachment_unavailable", 409);
+    assertDomain(rows.every((row) => row.status === "complete" && !row.message_id && !row.meeting_message_id
+      && existsSync(this.filePath(row.id))), "Attachment is incomplete, expired, or already sent", "attachment_unavailable", 409);
     const total = rows.reduce((sum, row) => sum + row.declared_size, 0);
     assertDomain(total <= ATTACHMENT_LIMITS.messageBytes, "Attachments may total at most 250 MiB per message", "attachments_too_large");
     return rows.map((row) => ({ ...this.publicAttachment(row), path: this.filePath(row.id) }));
@@ -127,6 +130,23 @@ export class AttachmentService {
     const update = this.database.db.prepare("UPDATE attachment_uploads SET message_id = ?, updated_at = ? WHERE id = ? AND message_id IS NULL");
     const transaction = this.database.db.transaction(() => ids.forEach((id) => update.run(messageId, now(), id)));
     transaction();
+  }
+
+  claimForMeetingMessage(ids: string[], messageId: string, ownerId: string, deviceId: string): void {
+    const update = this.database.db.prepare(`UPDATE attachment_uploads SET meeting_message_id = ?, updated_at = ?
+      WHERE id = ? AND owner_type = 'orchestrator' AND owner_id = ? AND device_id = ?
+        AND status = 'complete' AND message_id IS NULL AND meeting_message_id IS NULL`);
+    for (const id of ids) {
+      const claimed = update.run(messageId, now(), id, ownerId, deviceId).changes;
+      assertDomain(claimed === 1, "Attachment is incomplete, expired, or already sent", "attachment_unavailable", 409);
+    }
+  }
+
+  forMeetingMessage(messageId: string): PreparedAttachment[] {
+    const rows = this.database.db.prepare("SELECT * FROM attachment_uploads WHERE meeting_message_id = ? ORDER BY created_at, id")
+      .all(messageId) as AttachmentRow[];
+    return rows.flatMap(row => row.status === "complete" && existsSync(this.filePath(row.id))
+      ? [{ ...this.publicAttachment(row), path: this.filePath(row.id) }] : []);
   }
 
   // Accepted messages must survive temporary-directory cleanup and long waits.
@@ -140,6 +160,8 @@ export class AttachmentService {
   }
 
   forSavedMessage(message: ChatMessage): PreparedAttachment[] {
+    const meetingMessageId = message.metadata?.meetingAttachmentMessageId;
+    if (typeof meetingMessageId === "string") return this.forMeetingMessage(meetingMessageId);
     return (message.metadata?.attachments ?? []).map((attachment) => {
       const { path } = this.resolveDownload(message.ownerType, message.ownerId, attachment.id);
       return { ...attachment, path };
@@ -193,6 +215,14 @@ export class AttachmentService {
     return { ...message, metadata: { ...message.metadata, attachments } };
   }
 
+  decorateMeetingMessage(message: MeetingMessage): MeetingMessage {
+    return { ...message, attachments: message.attachments.map(item => {
+      const row = this.database.db.prepare("SELECT * FROM attachment_uploads WHERE id = ? AND meeting_message_id = ?")
+        .get(item.id, message.id) as AttachmentRow | undefined;
+      return row ? this.publicAttachment(row) : { ...item, status: "expired" as const };
+    }) };
+  }
+
   cleanupStale(at = Date.now()): number {
     const rows = this.database.db.prepare(`SELECT * FROM attachment_uploads a WHERE status != 'expired' AND expires_at <= ?
       AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = a.message_id)
@@ -231,6 +261,9 @@ export class AttachmentService {
   }
 
   private previewUrl(ownerType: SessionOwnerType, ownerId: string, id: string): string {
+    if (ownerType === "orchestrator" && ownerId.startsWith("meeting:")) {
+      return `/api/meetings/${encodeURIComponent(ownerId.slice("meeting:".length))}/attachments/${encodeURIComponent(id)}`;
+    }
     return ownerType === "task"
       ? `/api/tasks/${encodeURIComponent(ownerId)}/attachments/${encodeURIComponent(id)}`
       : `/api/orchestrator/attachments/${encodeURIComponent(id)}`;

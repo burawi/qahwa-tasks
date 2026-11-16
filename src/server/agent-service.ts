@@ -24,12 +24,13 @@ import {
   type TaskAccessMode,
   type TaskWorkspace,
   type TaskSchedule,
+  type MeetingMessage,
   type WorkActivity,
 } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
 import { designPages, selectedDesignPageId, requireDesignPage, designPageName, selectDesignPage, insertDesignPage } from "./design-pages.js";
 import type { TaskService } from "./task-service.js";
-import { ATTACHMENT_LIMITS, type AttachmentService, type PreparedAttachment } from "./attachment-service.js";
+import { ATTACHMENT_LIMITS, meetingAttachmentOwnerId, type AttachmentService, type PreparedAttachment } from "./attachment-service.js";
 import { pendingMessageMutable, requireMutablePendingMessage } from "./pending-message.js";
 import { getOrchestratorSettings, orchestratorPreferencesPrompt } from "./orchestrator-settings.js";
 import { CodexTaskTitles } from "./codex-task-titles.js";
@@ -66,16 +67,28 @@ type OrchestratorAction =
   | ({ type: "create_task"; idempotencyKey: string; projectId: string; title: string; goal: string;
     details: string[]; doneWhen: string[]; reviewerIds: string[]; accessMode: TaskAccessMode; startNow: boolean } & DirectedAction)
   | ({ type: "task_review_feedback"; reviewId: string; message: string } & DirectedAction)
+  | ({ type: "task_review_resolution"; reviewId: string; resolution: "authorize" | "reject"; message: string } & DirectedAction)
   | ({ type: "management_delegate"; requestId: string; taskId: string; message: string } & DirectedAction)
   | ({ type: "management_create_task"; requestId: string; projectId: string; title: string; description: string; accessMode: TaskAccessMode } & DirectedAction)
   | ({ type: "management_feedback"; requestId: string; message: string } & DirectedAction);
 
 type ManagementSignal = { kind: "evidence" | "work" | "review"; summary: string; projectId?: string; taskId?: string };
-type ReviewSignal = { decision: "approved" | "changes_requested"; feedback: string };
+type ReviewSignal = {
+  decision: "approved" | "changes_requested" | "waiting_for_user" | "observation";
+  feedback: string;
+  decisionRequired?: string;
+  responsibleOwner?: string;
+};
+type TaskReviewEvidence = { validation: string[]; limitations: string[]; artifacts: string[] };
 
 type DirectTaskReviewRow = {
-  id: string; creation_id: string; member_id: string; status: "pending" | "awaiting_review" | "changes_requested" | "approved" | "failed";
+  id: string; creation_id: string; member_id: string;
+  status: "pending" | "awaiting_review" | "changes_requested" | "waiting_for_user" | "observed" | "approved" | "failed";
   snapshot_name: string; snapshot_title: string; latest_feedback: string | null; review_count: number; task_id: string; authorization_text: string;
+  position: number; feedback_kind: string | null; decision_required: string | null; responsible_owner: string | null;
+  feedback_delivery_status: string | null; feedback_delivered_at: string | null;
+  resolution_status: string | null; resolution_text: string | null; resolution_authorization_text: string | null;
+  review_policy: "legacy_parallel" | "sequential";
 };
 
 type TaskReviewerContext = {
@@ -84,6 +97,8 @@ type TaskReviewerContext = {
 };
 
 type OrchestratorOutcome = { status: "applied" | "queued" | "failed"; message: string };
+
+const MAIN_ORCHESTRATOR_ROLLOVER_RATIO = 0.75;
 
 export function appendAttachmentPaths(text: string, attachments: Array<Pick<PreparedAttachment, "id" | "filename" | "mediaType" | "size" | "path">>): string {
   if (!attachments.length) return text;
@@ -374,6 +389,7 @@ export function buildTaskImplementationHandoff(task: { humanId: string; projectN
 
 export function parseAgentEnvelope(text: string): {
   body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean;
+  reviewEvidence?: TaskReviewEvidence;
   startTasks: string[]; priorityTasks: string[]; intakeReady?: boolean; intakeAccessMode?: TaskAccessMode;
   accessRequest?: { mode: TaskAccessMode; authorization: string }; contextRollover?: string; silent: boolean; actions: OrchestratorAction[];
   management?: ManagementSignal; managementReview?: ReviewSignal;
@@ -386,6 +402,7 @@ export function parseAgentEnvelope(text: string): {
   let surface: SessionSurface | undefined;
   let design: DesignDocument | undefined;
   let review = false;
+  let reviewEvidence: TaskReviewEvidence | undefined;
   const startTasks: string[] = [];
   const priorityTasks: string[] = [];
   const actions: OrchestratorAction[] = [];
@@ -402,6 +419,14 @@ export function parseAgentEnvelope(text: string): {
       if (["neutral", "blue", "green", "orange", "red"].includes(String(parsed.tone))) tone = parsed.tone as TaskTone;
       if (["undecided", "chat", "design"].includes(String(parsed.surface))) surface = parsed.surface as SessionSurface;
       review = parsed.review === true;
+      const evidenceList = (value: unknown, limit: number) => Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean)
+          .slice(0, limit).map(item => item.slice(0, 2_000))
+        : [];
+      const validation = evidenceList(parsed.validation, 100);
+      const limitations = evidenceList(parsed.limitations, 100);
+      const artifacts = evidenceList(parsed.artifacts, 100);
+      if (validation.length || limitations.length || artifacts.length) reviewEvidence = { validation, limitations, artifacts };
     } catch { /* malformed optional envelope is displayed as ordinary text */ }
     body = body.replace(metadata[0], "").trim();
   }
@@ -469,9 +494,16 @@ export function parseAgentEnvelope(text: string): {
   body = body.replace(/<!--\s*qahwa-management-review:(\{[\s\S]*?\})\s*-->/i, (_match, value: string) => {
     try {
       const reviewSignal = object(JSON.parse(value));
-      if ((reviewSignal.decision === "approved" || reviewSignal.decision === "changes_requested")
+      if (["approved", "changes_requested", "waiting_for_user", "observation"].includes(String(reviewSignal.decision))
         && typeof reviewSignal.feedback === "string" && reviewSignal.feedback.trim()) {
-        managementReview = { decision: reviewSignal.decision, feedback: reviewSignal.feedback.trim().slice(0, 20_000) };
+        managementReview = {
+          decision: reviewSignal.decision as ReviewSignal["decision"],
+          feedback: reviewSignal.feedback.trim().slice(0, 20_000),
+          ...(typeof reviewSignal.decisionRequired === "string" && reviewSignal.decisionRequired.trim()
+            ? { decisionRequired: reviewSignal.decisionRequired.trim().slice(0, 2_000) } : {}),
+          ...(typeof reviewSignal.responsibleOwner === "string" && reviewSignal.responsibleOwner.trim()
+            ? { responsibleOwner: reviewSignal.responsibleOwner.trim().slice(0, 200) } : {}),
+        };
       }
     } catch { /* Invalid review requests remain inert. */ }
     return "";
@@ -523,6 +555,11 @@ export function parseAgentEnvelope(text: string): {
         else if (type === "task_review_feedback" && typeof candidate.reviewId === "string" && typeof candidate.message === "string") actions.push({
           type, reviewId: candidate.reviewId, message: candidate.message.trim().slice(0, 30_000), ...directed,
         });
+        else if (type === "task_review_resolution" && typeof candidate.reviewId === "string"
+          && (candidate.resolution === "authorize" || candidate.resolution === "reject") && typeof candidate.message === "string") actions.push({
+          type, reviewId: candidate.reviewId, resolution: candidate.resolution,
+          message: candidate.message.trim().slice(0, 30_000), ...directed,
+        });
         else if (type === "management_delegate" && typeof candidate.requestId === "string" && taskId && typeof candidate.message === "string") actions.push({
           type, requestId: candidate.requestId, taskId, message: candidate.message.trim().slice(0, 30_000), ...directed,
         });
@@ -541,20 +578,24 @@ export function parseAgentEnvelope(text: string): {
   }).trim();
   for (const taskId of startTasks) actions.push({ type: "start", taskId, authorization: "" });
   if (priorityTasks.length) actions.push({ type: "priority", taskIds: priorityTasks, authorization: "" });
-  return { body, message, tone, surface, design, review, startTasks, priorityTasks, intakeReady, intakeAccessMode, accessRequest,
+  return { body, message, tone, surface, design, review, reviewEvidence, startTasks, priorityTasks, intakeReady, intakeAccessMode, accessRequest,
     contextRollover, management, managementReview, silent, actions };
 }
 
 class CodexAppServer {
   private closed = false;
   private child: ChildProcessWithoutNullStreams | null = null;
+  private forceStopChild: ChildProcessWithoutNullStreams | null = null;
+  private processGroupId: number | null = null;
+  private readonly reconcilingStops = new WeakSet<ChildProcessWithoutNullStreams>();
   private initialized = false;
   private initializing: Promise<void> | null = null;
   private nextId = 1;
   private readonly pending = new Map<number, RpcPending>();
 
   constructor(private readonly onMessage: (message: JsonObject) => void,
-    private readonly environment: () => NodeJS.ProcessEnv = () => isolatedCodexEnvironment()) {}
+    private readonly environment: () => NodeJS.ProcessEnv = () => isolatedCodexEnvironment(),
+    private readonly isolatedProcessGroup = false) {}
 
   get ready(): boolean { return this.initialized; }
 
@@ -576,7 +617,6 @@ class CodexAppServer {
   async request(method: string, params: JsonObject, timeoutMs?: number): Promise<any> {
     this.start();
     const id = this.nextId++;
-    this.write({ jsonrpc: "2.0", id, method, params });
     return new Promise((resolve, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         this.pending.delete(id);
@@ -586,6 +626,12 @@ class CodexAppServer {
         resolve: value => { clearTimeout(timer); resolve(value); },
         reject: error => { clearTimeout(timer); reject(error); },
       });
+      try { this.write({ jsonrpc: "2.0", id, method, params }); }
+      catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
 
@@ -602,38 +648,86 @@ class CodexAppServer {
     this.write({ jsonrpc: "2.0", method, params });
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.closed = true;
-    this.child?.kill("SIGTERM");
-    this.child = null;
-    this.initialized = false;
+    await this.forceStop();
+  }
+
+  /** Stop only this controller and every command it started, then permit a clean restart. */
+  async forceStop(graceMs = 750): Promise<void> {
+    const child = this.child;
+    const processId = this.processId(child);
+    if (!processId) {
+      this.initialized = false;
+      return;
+    }
+    // Suppress the generic crash reconciliation until the caller has verified
+    // that this isolated process group, including command children, is gone.
+    this.forceStopChild = child;
+    try {
+      const exitObserved = !child || child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve(true)
+        : new Promise<boolean>(resolve => child.once("exit", () => resolve(true)));
+      await this.terminateProcessTree(child, processId, graceMs);
+      const exitHandled = await Promise.race([
+        exitObserved,
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 500)),
+      ]);
+      assertDomain(exitHandled, "The isolated Codex app-server did not exit cleanly", "codex_force_stop_failed", 503);
+      if (this.child === child) this.child = null;
+      if (this.processGroupId === processId) this.processGroupId = null;
+      this.initialized = false;
+      for (const pending of this.pending.values()) pending.reject(new Error("Codex App Server force-stopped"));
+      this.pending.clear();
+    } catch (error) {
+      // A failed direct Pause must not leave its suppression latch or a dead
+      // leader handle behind. Retain the group id so the next Pause retries it.
+      if (child && (child.exitCode !== null || child.signalCode !== null) && this.child === child) this.child = null;
+      if (!this.closed && this.isolatedProcessGroup) this.onMessage({
+        method: "qahwa/codex-stop-unverified",
+        params: { detail: error instanceof Error ? error.message : String(error) },
+      });
+      throw error;
+    } finally {
+      if (this.forceStopChild === child) this.forceStopChild = null;
+    }
+  }
+
+  /** Retry a retained descendant group without starting a replacement app-server. */
+  async forceStopOrphanedProcessTree(): Promise<boolean> {
+    const processId = this.processGroupId;
+    if (!this.isolatedProcessGroup || this.child || !processId || !this.processTreeAlive(processId)) return false;
+    await this.forceStop();
+    return true;
   }
 
   private start(): void {
     assertDomain(!this.closed, "Codex App Server connection is closed", "codex_closed", 503);
     if (this.child) return;
-    this.child = spawn("codex", ["app-server"], {
+    if (this.isolatedProcessGroup && this.processGroupId) {
+      if (this.processTreeAlive(this.processGroupId)) {
+        throw Object.assign(new Error("The previous isolated Codex process group is still running"), { code: "codex_force_stop_failed" });
+      }
+      this.processGroupId = null;
+    }
+    const child = this.child = spawn("codex", ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
       env: this.environment(),
+      detached: this.isolatedProcessGroup,
     });
-    readline.createInterface({ input: this.child.stdout }).on("line", (line) => {
+    if (this.isolatedProcessGroup && child.pid) this.processGroupId = child.pid;
+    readline.createInterface({ input: child.stdout }).on("line", (line) => {
       try { this.handle(JSON.parse(line) as JsonObject); } catch { /* app-server may emit a partial diagnostic */ }
     });
-    this.child.stderr.on("data", (chunk) => this.onMessage({ method: "qahwa/log", params: { text: String(chunk) } }));
-    this.child.on("error", () => {
-      for (const pending of this.pending.values()) pending.reject(new Error("Codex App Server unavailable"));
-      this.pending.clear();
-      this.child = null;
+    child.stderr.on("data", (chunk) => this.onMessage({ method: "qahwa/log", params: { text: String(chunk) } }));
+    const stopped = (detail: string) => {
       this.initialized = false;
-      this.onMessage({ method: "qahwa/codex-stopped" });
-    });
-    this.child.on("exit", () => {
-      this.child = null;
-      this.initialized = false;
-      for (const pending of this.pending.values()) pending.reject(new Error("Codex App Server stopped"));
+      for (const pending of this.pending.values()) pending.reject(new Error(detail));
       this.pending.clear();
-      this.onMessage({ method: "qahwa/codex-stopped" });
-    });
+      if (!this.closed && this.forceStopChild !== child) void this.reconcileUnexpectedStop(child);
+    };
+    child.on("error", () => stopped("Codex App Server unavailable"));
+    child.on("exit", () => stopped("Codex App Server stopped"));
   }
 
   private handle(message: JsonObject): void {
@@ -653,6 +747,61 @@ class CodexAppServer {
     assertDomain(this.child?.stdin.writable, "Codex App Server is unavailable", "codex_unavailable", 503);
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
+
+  private processId(child: ChildProcessWithoutNullStreams | null): number | null {
+    return this.isolatedProcessGroup ? this.processGroupId : child?.pid ?? null;
+  }
+
+  private signalProcess(child: ChildProcessWithoutNullStreams | null, processId: number, signal: NodeJS.Signals): void {
+    if (this.isolatedProcessGroup) {
+      try { process.kill(-processId, signal); return; } catch { /* fall back to direct child */ }
+    }
+    try { child?.kill(signal); } catch { /* process already exited */ }
+  }
+
+  private processTreeAlive(processId: number): boolean {
+    try {
+      process.kill(this.isolatedProcessGroup ? -processId : processId, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  private async terminateProcessTree(child: ChildProcessWithoutNullStreams | null, processId: number, graceMs: number): Promise<void> {
+    const stopped = async (timeoutMs: number): Promise<boolean> => {
+      const deadline = Date.now() + timeoutMs;
+      do {
+        if (!this.processTreeAlive(processId)) return true;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < deadline);
+      return !this.processTreeAlive(processId);
+    };
+    this.signalProcess(child, processId, "SIGTERM");
+    if (!await stopped(graceMs)) {
+      this.signalProcess(child, processId, "SIGKILL");
+      assertDomain(await stopped(1_500), "The isolated Codex process group is still running", "codex_force_stop_failed", 503);
+    }
+  }
+
+  private async reconcileUnexpectedStop(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (this.reconcilingStops.has(child)) return;
+    this.reconcilingStops.add(child);
+    const processId = this.processId(child);
+    try {
+      if (processId && this.processTreeAlive(processId)) await this.terminateProcessTree(child, processId, 750);
+      if (processId && this.processTreeAlive(processId)) throw new Error("The detached Codex process group is still running");
+      if (this.processGroupId === processId) this.processGroupId = null;
+      if (!this.closed && this.forceStopChild !== child) this.onMessage({ method: "qahwa/codex-stopped" });
+    } catch (error) {
+      if (!this.closed && this.forceStopChild !== child) this.onMessage({
+        method: "qahwa/codex-stop-unverified",
+        params: { detail: error instanceof Error ? error.message : String(error) },
+      });
+    } finally {
+      if (this.child === child) this.child = null;
+    }
+  }
 }
 
 export class AgentService {
@@ -662,6 +811,7 @@ export class AgentService {
   private drainingSchedules = false;
   private readonly codex: CodexAppServer;
   private readonly supervisorCodex: CodexAppServer;
+  private readonly taskCodex = new Map<string, CodexAppServer>();
   readonly taskTitles: CodexTaskTitles;
   readonly usage: CodexUsageService;
   readonly models: ChatModels;
@@ -678,6 +828,9 @@ export class AgentService {
   private readonly monitorTimer: NodeJS.Timeout;
   private readonly monitorNotices = new Set<string>();
   private drainingMessages = false;
+  private reconcilingReviews = false;
+  private recoveringMisroutedReviews = false;
+  private misroutedReviewsRecovered = false;
   private nextQueuePlanningAt = 0;
   private closed = false;
   readonly files: MessageFiles;
@@ -706,6 +859,10 @@ export class AgentService {
       assertDomain(["unsubscribed", "notSubscribed", "notLoaded"].includes(result?.status),
         "Codex did not acknowledge thread unsubscribe", "codex_unsubscribe_failed", 503);
       if (!this.closed && owner) this.recordEvent(owner, "session.unsubscribed", { threadId, status: result.status });
+      if (owner?.ownerType === "task" && this.taskCodex.get(owner.ownerId) === runtime) {
+        await runtime.close();
+        this.taskCodex.delete(owner.ownerId);
+      }
     });
     this.models = new ChatModels(database, {
       initialize: () => this.codex.initialize(),
@@ -737,11 +894,11 @@ export class AgentService {
       }
     }, 1000);
     this.scheduleTimer.unref();
-    this.resourceTimer = setInterval(() => void this.releaseInactiveSessions(), 15_000);
+    this.resourceTimer = setInterval(() => void this.releaseInactiveSessions().catch(() => undefined), 15_000);
     this.resourceTimer.unref();
-    this.monitorTimer = setInterval(() => void this.monitorPortfolio(), 60_000);
+    this.monitorTimer = setInterval(() => void this.monitorPortfolio().catch(() => undefined), 60_000);
     this.monitorTimer.unref();
-    void this.monitorPortfolio();
+    void this.monitorPortfolio().catch(() => undefined);
   }
 
   private upgradeSupervisorPolicy(): void {
@@ -765,7 +922,44 @@ export class AgentService {
   }
 
   private runtimeForOwner(ownerType: SessionOwnerType, ownerId: string): CodexAppServer {
-    return ownerType === "orchestrator" && ownerId !== "main" ? this.supervisorCodex : this.codex;
+    if (ownerType === "orchestrator") return ownerId === "main" ? this.codex : this.supervisorCodex;
+    let runtime = this.taskCodex.get(ownerId);
+    if (!runtime) {
+      runtime = new CodexAppServer((message) => {
+        if (message.method === "qahwa/codex-stopped") this.handleTaskRuntimeStopped(ownerId);
+        else if (message.method === "qahwa/codex-stop-unverified") this.handleTaskRuntimeStopUnverified(ownerId, String(object(message.params).detail ?? "The isolated task process group is still running"));
+        this.handleCodexMessage(message, runtime!);
+      }, () => isolatedCodexEnvironment(), true);
+      this.taskCodex.set(ownerId, runtime);
+    }
+    return runtime;
+  }
+
+  private handleTaskRuntimeStopped(ownerId: string): void {
+    if (this.closed) return;
+    const session = this.ensureSession("task", ownerId);
+    if (!["running", "waiting"].includes(session.runState)) return;
+    const timestamp = isoNow();
+    this.database.db.transaction(() => {
+      this.updateSession("task", ownerId, { runState: "interrupted", activeTurnId: null,
+        lastError: "The isolated task runtime stopped before turn completion" });
+      this.database.db.prepare("UPDATE pending_requests SET status='expired',resolved_at=? WHERE owner_type='task' AND owner_id=? AND status='pending'")
+        .run(timestamp, ownerId);
+    })();
+    if (session.activeTurnId) {
+      this.turnOwners.delete(session.activeTurnId);
+      this.turnMessageIds.delete(session.activeTurnId);
+    }
+    this.setPresence(ownerId, "Paused", "orange", "The isolated task runtime stopped and released its worktree lock");
+    void this.resumeQueues().catch(() => undefined);
+  }
+
+  private handleTaskRuntimeStopUnverified(ownerId: string, detail: string): void {
+    if (this.closed) return;
+    const session = this.ensureSession("task", ownerId);
+    if (!["running", "waiting"].includes(session.runState)) return;
+    this.updateSession("task", ownerId, { lastError: detail });
+    this.setPresence(ownerId, "Still running", "red", "The task runtime exited but one or more command processes could not be verified stopped");
   }
 
   private supervisorExecution(scope: SupervisorScope | null): JsonObject {
@@ -859,10 +1053,11 @@ export class AgentService {
   /** Sweep only known Qahwa threads in this app-server, including older idle bindings.
    * Future schedules remain durable and resume the saved thread when due. */
   private async releaseInactiveSessions(): Promise<void> {
-    if (this.closed || this.sweepingResources || (!this.codex.ready && !this.supervisorCodex.ready)) return;
+    const runtimes = [this.codex, this.supervisorCodex, ...this.taskCodex.values()];
+    if (this.closed || this.sweepingResources || !runtimes.some(runtime => runtime.ready)) return;
     this.sweepingResources = true;
     try {
-      for (const runtime of [this.codex, this.supervisorCodex]) {
+      for (const runtime of runtimes) {
         if (!runtime.ready) continue;
         let cursor: string | null = null;
         do {
@@ -1173,7 +1368,7 @@ export class AgentService {
       return id;
     }).immediate();
     if (canStart) await this.startSavedMessage(messageId);
-    else void this.drainPendingMessages();
+    else void this.drainPendingMessages().catch(() => undefined);
     return this.workspace(ownerType, ownerId);
   }
 
@@ -1293,7 +1488,9 @@ export class AgentService {
       if (ownerType === "task") this.database.db.prepare("UPDATE agent_sessions SET canvas_request_page_id = ? WHERE owner_type = 'task' AND owner_id = ?").run(requestPageId, ownerId);
       // Reserve the slot synchronously before any app-server RPC can yield.
       this.updateSession(ownerType, ownerId, { runState: "running", lastError: null });
-      session.activeAccessMode = ownerType === "orchestrator" ? "read-only" : this.nextAccessMode(session);
+      session.activeAccessMode = ownerType === "orchestrator"
+        ? ownerId === "main" ? "worktree-write" : "read-only"
+        : this.nextAccessMode(session);
       const supervisorScope = ownerType === "orchestrator" ? this.supervisorScope(ownerId, row.body) : null;
       const cwd = canonicalRoot(ownerType === "task" ? this.tasks.getTask(ownerId).rootDirectory
         : supervisorScope?.projects[0]?.rootDirectory ?? process.cwd());
@@ -1564,16 +1761,78 @@ export class AgentService {
   async interrupt(ownerType: SessionOwnerType, ownerId: string): Promise<TaskWorkspace> {
     ownerId = this.canonicalOwnerId(ownerType, ownerId);
     const session = this.ensureSession(ownerType, ownerId);
-    assertDomain(session.threadId && session.activeTurnId, "There is no active turn", "no_active_turn", 409);
+    if (!session.threadId || (!session.activeTurnId && !["running", "waiting"].includes(session.runState))) {
+      // Pause is idempotent. A repeated request must report the already-stopped
+      // workspace instead of turning a successful stop into an error.
+      return this.workspace(ownerType, ownerId);
+    }
     const runtime = this.runtimeForOwner(ownerType, ownerId);
-    await runtime.initialize();
-    await runtime.request("turn/interrupt", { threadId: session.threadId, turnId: session.activeTurnId });
+    let forced = ownerType === "task" && await runtime.forceStopOrphanedProcessTree();
+    if (!forced) await runtime.initialize();
+    const sameTurn = () => {
+      const current = this.ensureSession(ownerType, ownerId);
+      return current.generation === session.generation && current.threadId === session.threadId
+        && current.activeTurnId === session.activeTurnId;
+    };
+    const stoppedBeforeRequest = forced || await this.runtimeThreadStopped(runtime, session.threadId);
+    if (!sameTurn()) return this.workspace(ownerType, ownerId);
+    let failure: unknown = null;
+    if (!stoppedBeforeRequest && session.activeTurnId) {
+      try {
+        await runtime.request("turn/interrupt", { threadId: session.threadId, turnId: session.activeTurnId }, 5_000);
+      } catch (error) { failure = error; }
+    }
+    if (!sameTurn()) return this.workspace(ownerType, ownerId);
+    let stopped = stoppedBeforeRequest || await this.waitForRuntimeStop(runtime, session.threadId, 2_000);
+    if (!sameTurn()) return this.workspace(ownerType, ownerId);
+    if (!stopped && ownerType === "task") {
+      // Every task owns a separate process group, so this terminates only the
+      // selected task and its command children. Other tasks remain untouched.
+      await runtime.forceStop();
+      forced = true;
+      stopped = true;
+      this.recordEvent({ ownerType, ownerId }, "turn.force_stopped", {
+        threadId: session.threadId, turnId: session.activeTurnId,
+        reason: failure instanceof Error ? failure.message : "Interrupt was not acknowledged",
+      });
+    }
+    assertDomain(stopped, failure instanceof Error ? `Codex did not stop the active turn: ${failure.message}`
+      : "Codex still reports the turn as active", "interrupt_not_verified", 503);
     const current = this.ensureSession(ownerType, ownerId);
     if (current.generation === session.generation && current.threadId === session.threadId && current.activeTurnId === session.activeTurnId) {
-      this.updateSession(ownerType, ownerId, { runState: "interrupted", activeTurnId: null });
-      if (ownerType === "task") this.setPresence(ownerId, "Paused", "orange", "The user interrupted the active turn");
+      const timestamp = isoNow();
+      this.database.db.transaction(() => {
+        this.updateSession(ownerType, ownerId, { runState: "interrupted", activeTurnId: null,
+          lastError: forced ? "Active turn required an isolated force-stop" : null });
+        this.database.db.prepare("UPDATE pending_requests SET status='expired',resolved_at=? WHERE owner_type=? AND owner_id=? AND status='pending'")
+          .run(timestamp, ownerType, ownerId);
+      })();
+      if (session.activeTurnId) {
+        this.turnOwners.delete(session.activeTurnId);
+        this.orchestratorUserTurns.delete(session.activeTurnId);
+        this.turnMessageIds.delete(session.activeTurnId);
+      }
+      if (ownerType === "task") this.setPresence(ownerId, "Paused", "orange",
+        forced ? "The stuck task runtime was force-stopped and its worktree lock released" : "The user interrupted the active turn");
+      void this.resumeQueues().catch(() => undefined);
     }
     return this.workspace(ownerType, ownerId);
+  }
+
+  private async runtimeThreadStopped(runtime: CodexAppServer, threadId: string): Promise<boolean> {
+    try {
+      const result = await runtime.request("thread/read", { threadId, includeTurns: false }, 2_000);
+      return ["idle", "systemError", "notLoaded", "notFound"].includes(String(result?.thread?.status?.type ?? ""));
+    } catch { return false; }
+  }
+
+  private async waitForRuntimeStop(runtime: CodexAppServer, threadId: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (await this.runtimeThreadStopped(runtime, threadId)) return true;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < deadline);
+    return false;
   }
 
   async resolveRequest(requestId: string, response: { approved?: boolean; answers?: Record<string, string> }): Promise<void> {
@@ -1627,14 +1886,19 @@ export class AgentService {
     return this.workspace("orchestrator", "main");
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    if (this.closed) return;
     this.closed = true;
     if (this.observationTimer) clearTimeout(this.observationTimer);
     clearInterval(this.monitorTimer);
     clearInterval(this.scheduleTimer);
     clearInterval(this.resourceTimer);
-    this.codex.close();
-    this.supervisorCodex.close();
+    await Promise.all([
+      this.codex.close(),
+      this.supervisorCodex.close(),
+      ...[...this.taskCodex.values()].map(runtime => runtime.close()),
+    ]);
+    this.taskCodex.clear();
   }
 
   private ensureSession(ownerType: SessionOwnerType, ownerId: string): AgentSession {
@@ -1652,7 +1916,7 @@ export class AgentService {
   }
 
   private prompt(ownerType: SessionOwnerType, ownerId: string, userText: string, initial: boolean, selectedTasks?: SelectedTaskReference[], requestPageId: string | null = null, worktreeRoot?: string): string {
-    const envelope = `${FILE_DELIVERY_INSTRUCTIONS}\n\nAt the end of every response, append exactly one hidden marker: <!-- qahwa:{"message":"short task-list status under 7 words","tone":"neutral|blue|green|orange|red","surface":"chat|design","review":false} -->. Use green for a good completed/result state, red for failure/blocker, orange for warning or clarification needed, blue for active progress, neutral for dormant context. Set review true only when implementation and proportionate validation are complete and the task is genuinely ready for user review. Never claim completion without evidence.`;
+    const envelope = `${FILE_DELIVERY_INSTRUCTIONS}\n\nAt the end of every response, append exactly one hidden marker: <!-- qahwa:{"message":"short task-list status under 7 words","tone":"neutral|blue|green|orange|red","surface":"chat|design","review":false} -->. Use green for a good completed/result state, red for failure/blocker, orange for warning or clarification needed, blue for active progress, neutral for dormant context. Set review true only when implementation and proportionate validation are complete and the task is genuinely ready for user review. For a review submission, include non-empty \`validation\`, \`limitations\`, and \`artifacts\` string arrays in the same marker; artifact paths must resolve inside the task project root. Never claim completion without evidence.`;
     const member = ownerType === "orchestrator" ? this.team.memberForOwner(ownerId) : null;
     if (member) {
       const handoff = this.database.setting(`team_rollover:${ownerId}`);
@@ -1676,11 +1940,17 @@ This underlying context is hidden; your visible reply is copied only into the me
       const capacity = this.capacity();
       const directive = this.orchestratorDirective();
       const meetingAccess = this.team.orchestratorMeetingAccess(userText);
+      const recentUserInstructions = (this.database.db.prepare(`SELECT body FROM chat_messages m
+        WHERE owner_type='orchestrator' AND owner_id='main' AND role='user' AND cancelled_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id=m.id)
+        ORDER BY created_at DESC, m.rowid DESC LIMIT 12`).all() as Array<{ body: string }>)
+        .reverse().map(row => row.body.slice(0, 2_000));
       return `You are the user's portfolio orchestrator in Qahwa Tasks. Coordinate work through dedicated task sessions and supervisory team members. Never perform task work yourself or mutate project worktrees. You may manage Qahwa task and team records and send authorized instructions to task sessions. Preserve authorization already given in this conversation. For portfolio supervision, account for capacity and worktree conflicts; a task waiting for clarification does not consume a working slot. For automated observations, act only within the standing directive and remain silent using <!-- qahwa-silent --> when no material update is needed.
 
 ${orchestratorPreferencesPrompt(this.database)}
 Current capacity: ${JSON.stringify(capacity)}.
 Standing directive: ${directive ? JSON.stringify(directive) : "none"}.
+Recent delivered user instructions: ${JSON.stringify(recentUserInstructions)}.
 Projects: ${JSON.stringify(this.tasks.listProjects().map(({ id, name, rootDirectory }) => ({ id, name, rootDirectory })))}.
 Portfolio snapshot: ${JSON.stringify(this.orchestratorSnapshot())}.
 pendingTaskMessages: ${JSON.stringify(this.pendingTaskMessages())}.
@@ -1693,8 +1963,8 @@ Direct-request specialist reviews: ${JSON.stringify(this.directTaskReviewSnapsho
 Authenticated internal meeting access: ${JSON.stringify(meetingAccess)}.
 Use this read-only meeting context only to answer the current user. Active meetings are listed by default; archived meetings appear only when the current request explicitly asks for archived or historical meetings. A resolved record contains the complete transcript and participant snapshots. For resolution "ambiguous", ask one concise clarification naming the candidates. For "none" or "not_found", state that concisely. Never ask which meeting when resolution is "resolved", and never expose or request device credentials.
 Application coordination interface: append a hidden JSON array only when coordination or team management is needed:
-<!-- qahwa-actions:[{"type":"create_task","idempotencyKey":"stable short key for this requested task","projectId":"project uuid","title":"specific task title","goal":"complete goal","details":["scope or constraint"],"doneWhen":["verifiable acceptance criterion"],"reviewerIds":["member uuid"],"accessMode":"read-only|worktree-write","startNow":true,"authorization":"exact current user quote","directiveId":"standing directive id when used"},{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"consult","memberId":"member uuid","taskId":"ID-0001","message":"requested input","authorization":"exact quote"},{"type":"task_review_feedback","reviewId":"review uuid","message":"specialist corrections","authorization":"exact original user quote"},{"type":"management_delegate","requestId":"request uuid","taskId":"ID-0001","message":"complete execution brief","authorization":"exact originating meeting user quote"},{"type":"management_create_task","requestId":"request uuid","projectId":"project uuid","title":"specific task title","description":"immutable execution brief","accessMode":"read-only|worktree-write","authorization":"exact originating meeting user quote"},{"type":"management_feedback","requestId":"request uuid","message":"specialist corrections","authorization":"exact originating meeting user quote"},{"type":"member_create","name":"unique name","title":"professional title","instructions":"role instructions","authorization":"exact quote"},{"type":"member_update","memberId":"member uuid","name":"optional","title":"optional","instructions":"optional","authorization":"exact quote"},{"type":"member_avatar","memberId":"member uuid","attachmentId":"uploaded attachment id","authorization":"exact quote"},{"type":"member_delete","memberId":"member uuid","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"},{"type":"directive","enabled":true,"instruction":"ongoing instruction","authorization":"exact quote"}] -->
-Use create_task for a direct user request to create new execution work; never call qahwa_tasks.create_tasks from this supervisory session. Its idempotencyKey must be stable across retries. Supply the structured goal, details, doneWhen, requested access mode, specialist reviewer IDs, and startNow when immediate intake is requested. Task creation accepts only an exact quote from the current user message or the applicable standing directive—not titles, selections, summaries, member messages, or older unrelated conversation. Starts may include "accessMode":"read-only" for explicitly read-only preparation, based on the full authorized scope, never titles alone. To change a task mode use {"type":"access","taskId":"ID-0001","accessMode":"worktree-write","authorization":"exact user quote explicitly authorizing shared-file edits"}. Access changes apply only to later turns and may wait for exclusive access. A pending management request inherits only the exact originating user meeting message; use that quote for management_delegate or management_feedback. Do not widen it. Returned task results must go back to the recorded requesting specialist for review; coordinate corrections until approved. Include only the actions needed. Interpret the user's intent and scope yourself. On a user turn, authorization for actions other than create_task may come from the current or an earlier user message in this conversation; copy the smallest exact authorizing quote. On an automated observation, include the applicable standing directive's id and an exact quote from its sourceQuote. Respect later corrections and revocations. Keep your helpful, plain-language explanation alongside any actions; it remains visible in the conversation. Describe requested coordination as a next step, not as completed work. The application adds failures or queued outcomes when needed. Ordinary tool work should be described normally with verified results. ${envelope}
+<!-- qahwa-actions:[{"type":"create_task","idempotencyKey":"stable short key for this requested task","projectId":"project uuid","title":"specific task title","goal":"complete goal","details":["scope or constraint"],"doneWhen":["verifiable acceptance criterion"],"reviewerIds":["member uuid"],"accessMode":"read-only|worktree-write","startNow":true,"authorization":"exact current user quote","directiveId":"standing directive id when used"},{"type":"start","taskId":"ID-0001","authorization":"exact authorizing quote","directiveId":"standing directive id when used"},{"type":"priority","taskIds":["ID-0001"],"authorization":"exact quote"},{"type":"message","taskId":"ID-0001","message":"instruction","authorization":"exact quote"},{"type":"consult","memberId":"member uuid","taskId":"ID-0001","message":"requested input","authorization":"exact quote"},{"type":"task_review_resolution","reviewId":"review uuid","resolution":"authorize|reject","message":"user decision preserved verbatim","authorization":"exact current user quote"},{"type":"management_delegate","requestId":"request uuid","taskId":"ID-0001","message":"complete execution brief","authorization":"exact originating meeting user quote"},{"type":"management_create_task","requestId":"request uuid","projectId":"project uuid","title":"specific task title","description":"immutable execution brief","accessMode":"read-only|worktree-write","authorization":"exact originating meeting user quote"},{"type":"management_feedback","requestId":"request uuid","message":"specialist corrections","authorization":"exact originating meeting user quote"},{"type":"member_create","name":"unique name","title":"professional title","instructions":"role instructions","authorization":"exact quote"},{"type":"member_update","memberId":"member uuid","name":"optional","title":"optional","instructions":"optional","authorization":"exact quote"},{"type":"member_avatar","memberId":"member uuid","attachmentId":"uploaded attachment id","authorization":"exact quote"},{"type":"member_delete","memberId":"member uuid","authorization":"exact quote"},{"type":"interrupt","taskId":"ID-0001","authorization":"exact quote"},{"type":"directive","enabled":true,"instruction":"ongoing instruction","authorization":"exact quote"}] -->
+Use create_task for a direct user request to create new execution work; never call qahwa_tasks.create_tasks from this supervisory session. Its idempotencyKey must be stable across retries. Supply the structured goal, details, doneWhen, requested access mode, specialist reviewer IDs, and startNow when immediate intake is requested. Task creation accepts only an exact quote from the current user message or the applicable standing directive—not titles, selections, summaries, member messages, or older unrelated conversation. Starts may include "accessMode":"read-only" for explicitly read-only preparation, based on the full authorized scope, never titles alone. To change a task mode use {"type":"access","taskId":"ID-0001","accessMode":"worktree-write","authorization":"exact user quote explicitly authorizing shared-file edits"}. Access changes apply only to later turns and may wait for exclusive access. A pending management request inherits only the exact originating user meeting message; use that quote for management_delegate or management_feedback. Do not widen it. Direct specialist reviews advance automatically in configured order. In-scope corrections route back to the task automatically. Use task_review_resolution only when a direct review is explicitly waiting for the user's authorize-or-reject decision, and preserve the exact current user quote. Returned meeting task results still go back to the recorded requesting specialist for review; coordinate corrections until approved. Include only the actions needed. Interpret the user's intent and scope yourself. On a user turn, authorization for actions other than create_task may come from the current or an earlier user message in this conversation; copy the smallest exact authorizing quote. On an automated observation, include the applicable standing directive's id and an exact quote from its sourceQuote. Respect later corrections and revocations. Keep your helpful, plain-language explanation alongside any actions; it remains visible in the conversation. Describe requested coordination as a next step, not as completed work. The application adds failures or queued outcomes when needed. Ordinary tool work should be described normally with verified results. ${envelope}
 
 Conversation input: ${userText}`;
     }
@@ -1735,7 +2005,7 @@ Conversation input: ${userText}`;
       FROM orchestrator_task_reviewers r
       JOIN orchestrator_task_creations c ON c.id=r.creation_id
       LEFT JOIN team_members m ON m.id=r.member_id
-      WHERE c.task_id=? ORDER BY r.created_at,r.id`).all(taskId) as Array<Omit<TaskReviewerContext, "routable"> & { routable: number }>;
+      WHERE c.task_id=? ORDER BY r.position,r.created_at,r.id`).all(taskId) as Array<Omit<TaskReviewerContext, "routable"> & { routable: number }>;
     return rows.map(row => ({ ...row, routable: Boolean(row.routable) }));
   }
 
@@ -1807,7 +2077,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     }
     const meetingParticipant = ownerType === "orchestrator" ? this.team.participantForOwner(ownerId) : null;
     if (meetingParticipant) return `You are ${meetingParticipant.name}, ${meetingParticipant.title}, in a hidden meeting-only supervisory context. Never perform task work, mutate project files, deploy, publish, delete data, or make external changes. Your filesystem and network sandbox is read-only and network-blocked; Qahwa's scoped evidence tools can inspect only approved project evidence with no saved browser credentials. Your replies are copied only to the meeting transcript.`;
-    if (ownerType === "orchestrator") return `You are the portfolio orchestrator inside Qahwa Tasks. Coordinate work through task sessions and supervisory team members. Never perform task work or mutate project worktrees yourself. You may manage Qahwa task and team records and send authorized instructions. Your sandbox is read-only by server policy. Honor the user's scope and prior authorization. Distinguish direct user requests from automated observations; use <!-- qahwa-silent --> when an automated observation needs no response.\n\n${orchestratorPreferencesPrompt(this.database)}`;
+    if (ownerType === "orchestrator") return `You are the portfolio orchestrator inside Qahwa Tasks. Coordinate work through task sessions and supervisory team members. Never perform project implementation or take ownership of a task worker's changes. You may inspect and control Qahwa's own task runtimes when the user authorizes it, including diagnosing and stopping a stuck turn. Preserve worktree isolation and explicit commit, deploy, publish, destructive-action, and task-closure gates. Honor the user's scope and prior authorization. Distinguish direct user requests from automated observations; use <!-- qahwa-silent --> when an automated observation needs no response.\n\n${orchestratorPreferencesPrompt(this.database)}`;
     const task = this.tasks.getTask(ownerId);
     return intakeState === "pending"
       ? `You are the persistent Codex session for ${task.humanId}. You are in mandatory read-only intake: inspect context, clarify material ambiguity, and do not implement or edit until the application starts a new implementation thread.`
@@ -1862,6 +2132,44 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         recentSessionEvents: sessionEvents.reverse(),
       };
     });
+  }
+
+  private mainOrchestratorContextOverloaded(threadId: string, turnId: string | null): boolean {
+    if (!turnId) return false;
+    const row = this.database.db.prepare(`SELECT payload_json FROM session_events
+      WHERE owner_type='orchestrator' AND owner_id='main' AND thread_id=? AND turn_id=?
+        AND event_type='thread/tokenUsage/updated' ORDER BY id DESC LIMIT 1`)
+      .get(threadId, turnId) as { payload_json: string } | undefined;
+    if (!row) return false;
+    try {
+      const tokenUsage = object(object(object(JSON.parse(row.payload_json)).payload).tokenUsage);
+      const last = object(tokenUsage.last);
+      const used = Number(last.totalTokens ?? last.inputTokens ?? 0);
+      const window = Number(tokenUsage.modelContextWindow ?? 0);
+      return Number.isFinite(used) && Number.isFinite(window) && window > 0
+        && used / window >= MAIN_ORCHESTRATOR_ROLLOVER_RATIO;
+    } catch { return false; }
+  }
+
+  private rolloverMainOrchestratorContext(previous: AgentSession, runtime: CodexAppServer, threadId: string, turnId: string | null): boolean {
+    if (!this.mainOrchestratorContextOverloaded(threadId, turnId)) return false;
+    const timestamp = isoNow();
+    const changed = this.database.db.transaction(() => {
+      const result = this.database.db.prepare(`UPDATE agent_sessions
+        SET thread_id=NULL,generation=generation+1,last_error=NULL,updated_at=?
+        WHERE owner_type='orchestrator' AND owner_id='main' AND thread_id=? AND generation=? AND run_state='idle'`)
+        .run(timestamp, threadId, previous.generation);
+      if (!result.changes) return false;
+      this.addMessage("orchestrator", "main", "system",
+        "Started a fresh orchestrator session to keep portfolio supervision responsive.",
+        { contextRollover: true, previousThreadId: threadId });
+      return true;
+    })();
+    if (!changed) return false;
+    this.threadOwners.delete(threadId);
+    void runtime.request("thread/archive", { threadId }).catch(() => undefined);
+    this.orchestratorObservations.push("The previous orchestrator context reached its safe capacity and was rolled over. Re-evaluate unfinished authorized in-progress work now using the standing directive and recent delivered user instructions.");
+    return true;
   }
 
   private handleCodexMessage(message: JsonObject, runtime: CodexAppServer): void {
@@ -1942,6 +2250,9 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         this.threadOwners.delete(previous.threadId);
         void runtime.request("thread/archive", { threadId: previous.threadId }).catch(() => undefined);
       }
+      if (owner.ownerType === "orchestrator" && owner.ownerId === "main" && state === "idle" && previous.threadId) {
+        this.rolloverMainOrchestratorContext(previous, runtime, previous.threadId, turnId);
+      }
       if (notifyIdle) void this.idleNotifier?.completed(owner.ownerId, threadId!, turnId!).catch(() => undefined);
       if (owner.ownerType === "task" && state === "failed") {
         this.setPresence(owner.ownerId, "Run failed", "red", status);
@@ -1952,7 +2263,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
       if (!restarting) {
         if (owner.ownerType === "task" && this.orchestratorObservations.length) this.scheduleOrchestratorObservation();
         if (this.orchestratorObservations.length) this.scheduleOrchestratorObservation();
-        void this.resumeQueues();
+        void this.resumeQueues().catch(() => undefined);
       }
     }
   }
@@ -2012,15 +2323,26 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           copiedId = this.team.addMeetingMessage(responseTarget.id, { speakerType: participant.type, speakerId: participant.id,
             speakerName: participant.name, speakerTitle: participant.title }, body);
         } else if (responseTarget.type === "task" && typeof responseTarget.id === "string") {
+          const registeredReview = participant.type === "member" && parsed.managementReview
+            ? this.registeredTaskReview(responseTarget.id, participant.id) : null;
           copiedId = this.addMessage("task", responseTarget.id, "assistant", body, {
             speaker: { type: participant.type, id: participant.id, name: participant.name, title: participant.title, avatar: participant.avatar },
             teamDispatchId: sourceMetadata.teamDispatchId, originatingInteraction: sourceMessageId,
           });
+          if (registeredReview && parsed.managementReview) {
+            const dispatch = this.database.db.prepare("SELECT created_at FROM team_dispatches WHERE id=?")
+              .get(sourceMetadata.teamDispatchId) as { created_at: string } | undefined;
+            if (dispatch && this.applyDirectReviewSignal(registeredReview, parsed.managementReview, { dispatchedAt: dispatch.created_at })) {
+              this.database.db.prepare(`UPDATE chat_messages SET metadata_json=json_set(COALESCE(metadata_json,'{}'),
+                '$.specialistReview',?) WHERE id=?`).run(registeredReview.id, copiedId);
+              this.advanceAfterDirectReview(registeredReview, parsed.managementReview, participant.name);
+            }
+          }
         } else if (responseTarget.type === "management_review" && typeof responseTarget.id === "string") {
           const request = this.team.getManagementRequest(responseTarget.id);
           copiedId = this.team.addMeetingMessage(request.meetingId, { speakerType: participant.type, speakerId: participant.id,
             speakerName: participant.name, speakerTitle: participant.title }, body);
-          const decision = parsed.managementReview?.decision ?? "changes_requested";
+          const decision = parsed.managementReview?.decision === "approved" ? "approved" : "changes_requested";
           this.team.saveManagementReview(request.id, decision, parsed.managementReview?.feedback ?? body);
           this.orchestratorObservations.push(`${participant.name} ${decision === "approved" ? "approved" : "requested corrections to"} the task result for meeting request ${request.id}.`);
           this.scheduleOrchestratorObservation();
@@ -2030,14 +2352,13 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
             speaker: { type: participant.type, id: participant.id, name: participant.name, title: participant.title, avatar: participant.avatar },
             teamDispatchId: sourceMetadata.teamDispatchId, specialistReview: review.id,
           });
-          const decision = parsed.managementReview?.decision ?? "changes_requested";
-          const feedback = parsed.managementReview?.feedback ?? body;
-          const changed = this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status=?,latest_feedback=?,
-            review_count=review_count+1,updated_at=? WHERE id=? AND status='awaiting_review'`)
-            .run(decision, feedback.slice(0, 20_000), isoNow(), review.id).changes;
-          assertDomain(changed === 1, "Specialist review is no longer awaiting a response", "task_review_state", 409);
-          this.orchestratorObservations.push(`${participant.name} ${decision === "approved" ? "approved" : "requested corrections to"} ${this.coordinationTaskName(review.task_id)}.`);
-          this.scheduleOrchestratorObservation();
+          const signal = parsed.managementReview;
+          const decision = signal?.decision ?? "waiting_for_user";
+          const feedback = signal?.feedback ?? body;
+          const normalizedSignal: ReviewSignal = signal ?? { decision, feedback };
+          assertDomain(this.applyDirectReviewSignal(review, normalizedSignal, { expectedAwaitingReview: true }),
+            "Specialist review is no longer awaiting a response", "task_review_state", 409);
+          this.advanceAfterDirectReview(review, normalizedSignal, participant.name);
         } else throw new Error("The response target is unavailable");
         this.team.completeDispatch(sourceMetadata.teamDispatchId, copiedId);
         if (responseTarget.type === "meeting" && parsed.management && typeof responseTarget.id === "string") {
@@ -2100,6 +2421,9 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         this.tasks.submitForReview(completedTask.id, {
           sessionId: this.ensureSession("task", owner.ownerId).threadId ?? undefined,
           summary: body.slice(0, 10_000),
+          validation: parsed.reviewEvidence?.validation,
+          limitations: parsed.reviewEvidence?.limitations,
+          artifacts: parsed.reviewEvidence?.artifacts,
         }, "codex");
       }
       if (session.intakeState === "ready" && parsed.review) {
@@ -2136,12 +2460,18 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     assertDomain(input.sourceKey.length > 0 && input.actionKey.trim().length > 0, "Task creation needs a stable idempotency key", "invalid_task_creation_key");
     assertDomain(input.title.trim().length > 0 && input.goal.trim().length > 0, "Task title and goal are required", "invalid_task_creation");
     const normalized = { projectId: input.projectId, title: input.title.trim(), goal: input.goal.trim(), details: input.details,
-      doneWhen: input.doneWhen, reviewerIds: [...new Set(input.reviewerIds)].sort(), accessMode: input.accessMode, startNow: input.startNow };
+      doneWhen: input.doneWhen, reviewerIds: [...new Set(input.reviewerIds)], accessMode: input.accessMode, startNow: input.startNow };
     const requestHash = createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
-    const existing = this.database.db.prepare(`SELECT task_id,request_hash FROM orchestrator_task_creations
-      WHERE source_key=? AND action_key=?`).get(input.sourceKey, input.actionKey.trim()) as { task_id: string; request_hash: string } | undefined;
+    const legacyRequestHash = createHash("sha256").update(JSON.stringify({
+      ...normalized, reviewerIds: [...normalized.reviewerIds].sort(),
+    })).digest("hex");
+    type ExistingCreation = { task_id: string; request_hash: string; review_policy: "legacy_parallel" | "sequential" };
+    const matchesExisting = (row: ExistingCreation) => row.request_hash === requestHash
+      || (row.review_policy === "legacy_parallel" && row.request_hash === legacyRequestHash);
+    const existing = this.database.db.prepare(`SELECT task_id,request_hash,review_policy FROM orchestrator_task_creations
+      WHERE source_key=? AND action_key=?`).get(input.sourceKey, input.actionKey.trim()) as ExistingCreation | undefined;
     if (existing) {
-      assertDomain(existing.request_hash === requestHash, "That task-creation key was already used for different work", "task_creation_conflict", 409);
+      assertDomain(matchesExisting(existing), "That task-creation key was already used for different work", "task_creation_conflict", 409);
       return { task: this.tasks.getTask(existing.task_id), duplicate: true };
     }
     const reviewers = normalized.reviewerIds.map(id => this.team.getMember(id));
@@ -2152,10 +2482,10 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
       reviewers.length ? `Specialist review:\n${reviewers.map(member => `- ${member.name}, ${member.title}`).join("\n")}` : "",
     ].filter(Boolean).join("\n\n");
     return this.database.db.transaction(() => {
-      const raced = this.database.db.prepare(`SELECT task_id,request_hash FROM orchestrator_task_creations
-        WHERE source_key=? AND action_key=?`).get(input.sourceKey, input.actionKey.trim()) as { task_id: string; request_hash: string } | undefined;
+      const raced = this.database.db.prepare(`SELECT task_id,request_hash,review_policy FROM orchestrator_task_creations
+        WHERE source_key=? AND action_key=?`).get(input.sourceKey, input.actionKey.trim()) as ExistingCreation | undefined;
       if (raced) {
-        assertDomain(raced.request_hash === requestHash, "That task-creation key was already used for different work", "task_creation_conflict", 409);
+        assertDomain(matchesExisting(raced), "That task-creation key was already used for different work", "task_creation_conflict", 409);
         return { task: this.tasks.getTask(raced.task_id), duplicate: true };
       }
       const task = this.tasks.createTask({ projectId: normalized.projectId, title: normalized.title,
@@ -2166,12 +2496,13 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
       }
       const creationId = randomUUID(); const timestamp = isoNow();
       this.database.db.prepare(`INSERT INTO orchestrator_task_creations
-        (id,source_key,action_key,request_hash,authorization_text,project_id,task_id,reviewer_ids_json,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)`).run(creationId, input.sourceKey, input.actionKey.trim(), requestHash, input.authorizationText,
-          normalized.projectId, task.id, JSON.stringify(normalized.reviewerIds), timestamp);
+        (id,source_key,action_key,request_hash,authorization_text,project_id,task_id,reviewer_ids_json,review_policy,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(creationId, input.sourceKey, input.actionKey.trim(), requestHash, input.authorizationText,
+          normalized.projectId, task.id, JSON.stringify(normalized.reviewerIds), "sequential", timestamp);
       const insertReviewer = this.database.db.prepare(`INSERT INTO orchestrator_task_reviewers
-        (id,creation_id,member_id,snapshot_name,snapshot_title,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`);
-      for (const reviewer of reviewers) insertReviewer.run(randomUUID(), creationId, reviewer.id, reviewer.name, reviewer.title, timestamp, timestamp);
+        (id,creation_id,member_id,snapshot_name,snapshot_title,position,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`);
+      reviewers.forEach((reviewer, position) => insertReviewer.run(randomUUID(), creationId, reviewer.id,
+        reviewer.name, reviewer.title, position, timestamp, timestamp));
       if (normalized.startNow) this.database.db.prepare(`INSERT INTO scheduler_queue(task_id,requested_by,reason,created_at)
         VALUES (?, 'orchestrator', ?, ?) ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,created_at=excluded.created_at`)
         .run(task.id, `Direct orchestrator task creation ${creationId}`, timestamp);
@@ -2180,20 +2511,68 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
   }
 
   private directTaskReview(id: string): DirectTaskReviewRow {
-    const row = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text FROM orchestrator_task_reviewers r
+    const row = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text,c.review_policy FROM orchestrator_task_reviewers r
       JOIN orchestrator_task_creations c ON c.id=r.creation_id WHERE r.id=?`).get(id) as DirectTaskReviewRow | undefined;
     assertDomain(row, "Specialist task review not found", "task_review_not_found", 404);
     return row;
   }
 
+  private registeredTaskReview(taskId: string, memberId: string): DirectTaskReviewRow | null {
+    return this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text,c.review_policy
+      FROM orchestrator_task_reviewers r
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id
+      JOIN tasks t ON t.id=c.task_id
+      WHERE c.task_id=? AND r.member_id=? AND t.status='in_review'
+      ORDER BY c.created_at DESC,r.rowid DESC LIMIT 1`).get(taskId, memberId) as DirectTaskReviewRow | undefined ?? null;
+  }
+
+  private applyDirectReviewSignal(review: DirectTaskReviewRow, signal: ReviewSignal, options: {
+    expectedAwaitingReview?: boolean; dispatchedAt?: string;
+  } = {}): boolean {
+    const decision = signal.decision;
+    const status = decision === "observation" ? "observed" : decision;
+    const feedbackKind = decision === "approved" ? "approval"
+      : decision === "changes_requested" ? "in_scope_correction"
+        : decision === "observation" ? "observation" : "authority_required";
+    const deliveryStatus = decision === "changes_requested" ? "pending"
+      : decision === "waiting_for_user" ? "waiting_user" : "not_required";
+    const decisionRequired = decision === "waiting_for_user"
+      ? signal.decisionRequired || `Decide whether to authorize or reject the work requested by ${review.snapshot_name}` : null;
+    const responsibleOwner = decision === "waiting_for_user" ? signal.responsibleOwner || "You" : null;
+    const stateGuard = options.expectedAwaitingReview
+      ? "status='awaiting_review'"
+      : "status IN ('pending','awaiting_review','changes_requested','waiting_for_user','observed','approved') AND updated_at<?";
+    const parameters = [status, signal.feedback.slice(0, 20_000), feedbackKind, decisionRequired, responsibleOwner,
+      deliveryStatus, isoNow(), review.id, ...(options.expectedAwaitingReview ? [] : [options.dispatchedAt!])];
+    return this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status=?,latest_feedback=?,feedback_kind=?,
+      decision_required=?,responsible_owner=?,feedback_delivery_status=?,feedback_delivered_at=NULL,
+      review_count=review_count+1,updated_at=? WHERE id=? AND ${stateGuard}`).run(...parameters).changes === 1;
+  }
+
+  private advanceAfterDirectReview(review: DirectTaskReviewRow, signal: ReviewSignal, participantName: string): void {
+    this.orchestratorObservations.push(`${participantName} ${signal.decision === "approved" ? "approved"
+      : signal.decision === "changes_requested" ? "requested authorized corrections to"
+        : signal.decision === "observation" ? "recorded a non-blocking observation for"
+          : "identified feedback requiring user authority for"} ${this.coordinationTaskName(review.task_id)}.`);
+    this.scheduleOrchestratorObservation();
+    void this.continueDirectReviewWorkflow(review.id).catch(error => {
+      this.orchestratorObservations.push(`Could not advance ${this.coordinationTaskName(review.task_id)} after ${participantName}'s review: ${error instanceof Error ? error.message : String(error)}`);
+      this.scheduleOrchestratorObservation();
+    });
+  }
+
   private directTaskReviewSnapshot(): unknown[] {
-    return this.database.db.prepare(`SELECT r.id,r.member_id AS memberId,r.status,r.latest_feedback AS latestFeedback,r.review_count AS reviewCount,
+    return this.database.db.prepare(`SELECT r.id,r.member_id AS memberId,r.status,r.latest_feedback AS latestFeedback,
+      r.feedback_kind AS feedbackKind,r.decision_required AS decisionRequired,r.responsible_owner AS responsibleOwner,
+      r.feedback_delivery_status AS feedbackDeliveryStatus,r.resolution_status AS resolutionStatus,
+      r.resolution_text AS resolutionText,r.resolution_authorization_text AS resolutionAuthorizationText,
+      r.review_count AS reviewCount,r.position,c.review_policy AS reviewPolicy,
       t.human_id AS taskId,t.title,r.snapshot_name AS snapshotName,r.snapshot_title AS snapshotTitle,
       CASE WHEN m.archived_at IS NULL THEN m.name ELSE NULL END AS currentName,
       CASE WHEN m.archived_at IS NULL THEN m.title ELSE NULL END AS currentTitle
       FROM orchestrator_task_reviewers r JOIN orchestrator_task_creations c ON c.id=r.creation_id
       JOIN tasks t ON t.id=c.task_id LEFT JOIN team_members m ON m.id=r.member_id
-      WHERE r.status IN ('pending','awaiting_review','changes_requested') ORDER BY r.updated_at`)
+      WHERE r.status IN ('pending','awaiting_review','changes_requested','waiting_for_user') ORDER BY r.position,r.updated_at`)
       .all() as unknown[];
   }
 
@@ -2201,13 +2580,13 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     sourceItemId: string = randomUUID(), authorizationMessageId: string | null = null): Promise<OrchestratorOutcome[]> {
     const outcomes: OrchestratorOutcome[] = [];
     const requestedStarts: string[] = [];
-    const authorizingConversation = authorizingUserMessage === undefined ? undefined : [
-      authorizingUserMessage,
-      ...(this.database.db.prepare(`SELECT body FROM chat_messages
-        WHERE owner_type = 'orchestrator' AND owner_id = 'main' AND role = 'user' AND cancelled_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = chat_messages.id)`)
-        .all() as Array<{ body: string }>).map(({ body }) => body),
-    ].join("\n\n");
+    const historicalUserMessages = (this.database.db.prepare(`SELECT body FROM chat_messages
+      WHERE owner_type = 'orchestrator' AND owner_id = 'main' AND role = 'user' AND cancelled_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM pending_messages p WHERE p.message_id = chat_messages.id)`)
+      .all() as Array<{ body: string }>).map(({ body }) => body);
+    const historicalUserConversation = historicalUserMessages.join("\n\n");
+    const authorizingConversation = authorizingUserMessage === undefined ? undefined
+      : [authorizingUserMessage, ...historicalUserMessages].join("\n\n");
     let directive = this.orchestratorDirective();
     for (const [actionIndex, action] of actions.entries()) {
       try {
@@ -2233,12 +2612,21 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         }
         const managementRequest = action.type === "management_delegate" || action.type === "management_create_task" || action.type === "management_feedback"
           ? this.team.getManagementRequest(action.requestId) : null;
-        const directReview = action.type === "task_review_feedback" ? this.directTaskReview(action.reviewId) : null;
+        const directReview = action.type === "task_review_feedback" || action.type === "task_review_resolution"
+          ? this.directTaskReview(action.reviewId) : null;
         const meetingAuthorization = managementRequest ? this.database.db.prepare(`SELECT body FROM meeting_messages
           WHERE id=? AND meeting_id=? AND speaker_type='user'`).get(managementRequest.sourceMessageId, managementRequest.meetingId) as { body: string } | undefined : undefined;
         const currentlyAuthorized = hasCurrentUserAuthorization(authorizingConversation, action.authorization)
           || hasCurrentUserAuthorization(meetingAuthorization?.body, action.authorization)
           || hasCurrentUserAuthorization(directReview?.authorization_text, action.authorization);
+        // Automated observations may safely resume or guide an existing in-progress task
+        // when two durable grants agree: an active standing supervision directive
+        // and the exact historical user instruction quoted by the action. This does
+        // not authorize Todo starts, new scope, or actions absent from that quote.
+        const historicallyAuthorizedContinuation = (action.type === "start" || action.type === "message")
+          && authorizingUserMessage === undefined && Boolean(directive)
+          && this.tasks.getTask(action.taskId).status === "in_progress"
+          && hasCurrentUserAuthorization(historicalUserConversation, action.authorization);
         if (action.type === "directive") {
           if (!currentlyAuthorized) throw new Error("A standing directive must be authorized by the user in this conversation");
           if (action.enabled) {
@@ -2254,12 +2642,16 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           continue;
         }
         const standingAuthorized = hasStandingDirectiveAuthorization(directive, action.directiveId, action.authorization);
-        if (action.type === "create_task") {
+        if (action.type === "task_review_resolution") {
+          assertDomain(hasCurrentUserAuthorization(authorizingUserMessage, action.authorization),
+            "Resolving newly scoped specialist feedback needs an exact quote from the current user message",
+            "task_review_resolution_authorization", 403);
+        } else if (action.type === "create_task") {
           assertDomain(hasCurrentUserAuthorization(authorizingUserMessage, action.authorization) || standingAuthorized,
             "Creating a task needs an exact quote from the current user request or the applicable standing directive", "task_creation_authorization", 403);
           assertDomain((hasCurrentUserAuthorization(authorizingUserMessage, action.authorization) && authorizationMessageId) || (standingAuthorized && directive),
             "Task creation authorization source is unavailable", "task_creation_authorization", 403);
-        } else if (!currentlyAuthorized && !standingAuthorized) {
+        } else if (!currentlyAuthorized && !standingAuthorized && !historicallyAuthorizedContinuation) {
           throw new Error("The action was not authorized by the user conversation or the active standing directive");
         }
         if (action.type === "member_create") {
@@ -2290,12 +2682,28 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
             : `${created.task.humanId} was created${action.startNow ? " and queued for mandatory intake" : ""}.` });
         } else if (action.type === "task_review_feedback") {
           assertDomain(directReview?.status === "changes_requested", "This specialist review has no corrections ready", "task_review_state", 409);
-          const outcome = await this.messageTask(directReview.task_id,
-            `Specialist review corrections: ${directReview.latest_feedback ?? action.message}\n\nOrchestrator correction brief: ${action.message}`,
-            sourceMessageId, `direct-review-feedback:${directReview.id}:${directReview.review_count}`);
-          if (outcome.status !== "failed") this.database.db.prepare(`UPDATE orchestrator_task_reviewers
-            SET status='pending',updated_at=? WHERE id=? AND status='changes_requested'`).run(isoNow(), directReview.id);
-          outcomes.push(outcome);
+          this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET feedback_kind='in_scope_correction',
+            feedback_delivery_status='pending',resolution_text=COALESCE(resolution_text,?),updated_at=?
+            WHERE id=? AND status='changes_requested'`).run(action.message, isoNow(), directReview.id);
+          await this.continueDirectReviewWorkflow(directReview.id);
+          outcomes.push({ status: "queued", message: `${directReview.snapshot_name}'s preserved feedback was routed to the task session.` });
+        } else if (action.type === "task_review_resolution") {
+          assertDomain(directReview?.status === "waiting_for_user", "This specialist review is not waiting for a user decision", "task_review_state", 409);
+          if (action.resolution === "authorize") {
+            this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='changes_requested',feedback_kind='in_scope_correction',
+              decision_required=NULL,responsible_owner=NULL,feedback_delivery_status='pending',resolution_status='authorized',
+              resolution_text=?,resolution_authorization_text=?,updated_at=? WHERE id=? AND status='waiting_for_user'`)
+              .run(action.message, action.authorization, isoNow(), directReview.id);
+            await this.continueDirectReviewWorkflow(directReview.id);
+            outcomes.push({ status: "queued", message: `${directReview.snapshot_name}'s newly authorized feedback was preserved and routed to the task session.` });
+          } else {
+            this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='observed',feedback_kind='observation',
+              decision_required=NULL,responsible_owner=NULL,feedback_delivery_status='rejected',resolution_status='rejected',
+              resolution_text=?,resolution_authorization_text=?,updated_at=? WHERE id=? AND status='waiting_for_user'`)
+              .run(action.message, action.authorization, isoNow(), directReview.id);
+            await this.continueDirectReviewWorkflow(directReview.id);
+            outcomes.push({ status: "applied", message: `${directReview.snapshot_name}'s feedback was preserved as declined, out-of-scope work and the review sequence advanced.` });
+          }
         } else if (action.type === "management_delegate") {
           assertDomain(managementRequest?.status === "pending", "This management request is no longer pending", "management_request_state", 409);
           const outcome = await this.messageTask(action.taskId,
@@ -2366,6 +2774,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           : action.type === "consult" ? `ask the selected team member to advise ${target}`
           : action.type === "create_task" ? "create the requested task"
           : action.type === "task_review_feedback" ? "send the specialist review back to its task"
+          : action.type === "task_review_resolution" ? "apply the user's specialist-feedback decision"
           : action.type === "management_delegate" ? `delegate the meeting request to ${target}`
           : action.type === "management_create_task" ? "create a task for the meeting request"
           : action.type === "management_feedback" ? "send the specialist review back to its task"
@@ -2388,10 +2797,13 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
   }
 
   private async queueTeamPrompt(ownerId: string, participant: import("../domain/types.js").MeetingParticipant, prompt: string,
-    responseTarget: { type: "meeting" | "task" | "management_review" | "direct_review"; id: string }, dispatchId: string): Promise<void> {
+    responseTarget: { type: "meeting" | "task" | "management_review" | "direct_review"; id: string }, dispatchId: string,
+    meetingAttachments: PreparedAttachment[] = [], meetingMessageId?: string): Promise<void> {
     const messageId = this.addMessage("orchestrator", ownerId, "system", prompt, {
       teamDispatchId: dispatchId, responseTarget, participantType: participant.type, participantId: participant.id,
       participantName: participant.name, participantTitle: participant.title, participantAvatar: participant.avatar,
+      ...(meetingMessageId ? { meetingAttachmentMessageId: meetingMessageId } : {}),
+      ...(meetingAttachments.length ? { attachments: meetingAttachments.map(({ path: _path, ...attachment }) => attachment) } : {}),
       interactionTrace: true,
     });
     this.database.db.prepare(`INSERT INTO pending_messages(message_id,dispatch_order)
@@ -2410,8 +2822,9 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     });
     const dispatchId = this.team.createDispatch(traceId, "task", task.id, participant);
     const memberSession = this.team.ensureTaskSession(member.id, task.id);
+    const registeredReview = this.registeredTaskReview(task.id, member.id);
     await this.queueTeamPrompt(memberSessionOwnerId(memberSession.id), participant,
-      `You were invited to advise task ${task.humanId} · ${task.title}. The orchestrator asks: ${message}\n\nReply with named advice or instructions for the task session. Do not perform the task yourself.`,
+      `You were invited to advise task ${task.humanId} · ${task.title}. The orchestrator asks: ${message}\n\nReply with named advice or instructions for the task session. Do not perform the task yourself.${registeredReview ? ` If this request asks for your formal verdict on the current task result, append exactly one hidden review marker:\n- Approved: <!-- qahwa-management-review:{"decision":"approved","feedback":"complete evidence-based review"} -->\n- In-scope corrections: <!-- qahwa-management-review:{"decision":"changes_requested","feedback":"complete exact corrections"} -->\n- New authority required: <!-- qahwa-management-review:{"decision":"waiting_for_user","feedback":"complete feedback","decisionRequired":"exact user decision required","responsibleOwner":"You"} -->\n- Non-blocking observation: <!-- qahwa-management-review:{"decision":"observation","feedback":"complete observation"} -->` : ""}`,
       { type: "task", id: task.id }, dispatchId);
     return { status: "queued", message: `${member.name}'s input for ${this.coordinationTaskName(task.id)} is queued and will appear directly in the task conversation.` };
   }
@@ -2436,10 +2849,40 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
     }
   }
 
+  private requeueCorrectionsSupersededByFreshEvidence(taskId?: string): number {
+    const timestamp = isoNow();
+    return this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='pending',updated_at=?
+      WHERE status='changes_requested' AND EXISTS (
+        SELECT 1 FROM orchestrator_task_creations c
+        JOIN tasks t ON t.id=c.task_id
+        JOIN task_outputs fresh ON fresh.task_id=c.task_id
+        WHERE c.id=orchestrator_task_reviewers.creation_id AND t.status='in_review'
+          AND fresh.created_at>orchestrator_task_reviewers.updated_at
+          AND (? IS NULL OR c.task_id=?))`).run(timestamp, taskId ?? null, taskId ?? null).changes;
+  }
+
   private async queueDirectTaskReviews(taskId: string, resultBody: string): Promise<void> {
     const task = this.tasks.getTask(taskId);
-    const reviews = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text FROM orchestrator_task_reviewers r
-      JOIN orchestrator_task_creations c ON c.id=r.creation_id WHERE c.task_id=? AND r.status='pending' ORDER BY r.created_at`)
+    // A newer submitted output supersedes an older changes-requested verdict.
+    // This is especially important for legacy rows created before correction
+    // delivery timestamps existed: they must re-enter review instead of leaving
+    // a completed correction turn silently idle forever.
+    this.requeueCorrectionsSupersededByFreshEvidence(task.id);
+    const creation = this.database.db.prepare(`SELECT review_policy FROM orchestrator_task_creations WHERE task_id=?`)
+      .get(task.id) as { review_policy: DirectTaskReviewRow["review_policy"] } | undefined;
+    if (!creation) return;
+    const sequencing = creation.review_policy === "sequential" ? `AND NOT EXISTS (
+        SELECT 1 FROM orchestrator_task_reviewers earlier
+        WHERE earlier.creation_id=r.creation_id AND earlier.position<r.position
+          AND earlier.status NOT IN ('approved','observed')
+      )` : "";
+    const ordering = creation.review_policy === "sequential" ? "ORDER BY r.position,r.created_at,r.rowid LIMIT 1" : "";
+    const reviews = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text,c.review_policy FROM orchestrator_task_reviewers r
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id
+      WHERE c.task_id=? AND r.status='pending'
+        AND (r.feedback_delivered_at IS NULL OR EXISTS (
+          SELECT 1 FROM task_outputs fresh WHERE fresh.task_id=c.task_id AND fresh.created_at>r.feedback_delivered_at
+        )) ${sequencing} ${ordering}`)
       .all(task.id) as DirectTaskReviewRow[];
     for (const review of reviews) {
       let member: ReturnType<TeamService["getMember"]>;
@@ -2453,41 +2896,303 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
       const output = task.outputs.at(-1);
       const artifacts = output?.artifacts.map(artifact => ({ filename: artifact.filename, availability: artifact.availability,
         source: artifact.source, previewUrl: artifact.previewUrl })) ?? [];
-      const traceId = this.addMessage("task", task.id, "system", `${member.name} (${member.title}) is reviewing this result.`, {
-        specialistReview: review.id, memberId: member.id,
-      });
-      const dispatchId = this.team.createDispatch(traceId, "task", task.id, participant);
+      const laterAuthorizations = (this.database.db.prepare(`SELECT resolution_authorization_text AS authorization
+        FROM orchestrator_task_reviewers WHERE creation_id=? AND resolution_status='authorized'
+          AND resolution_authorization_text IS NOT NULL ORDER BY updated_at,rowid`).all(review.creation_id) as Array<{ authorization: string }>)
+        .map(row => row.authorization);
+      let dispatchId: string | null = null;
       try {
         const changed = this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='awaiting_review',updated_at=?
           WHERE id=? AND status='pending'`).run(isoNow(), review.id).changes;
         if (changed !== 1) continue;
+        const traceId = this.addMessage("task", task.id, "system", `${member.name} (${member.title}) is reviewing this result. Next action: ${member.name} reviews the submitted evidence.`, {
+          specialistReview: review.id, memberId: member.id,
+        });
+        dispatchId = this.team.createDispatch(traceId, "task", task.id, participant);
         const memberSession = this.team.ensureTaskSession(member.id, task.id);
         await this.queueTeamPrompt(memberSessionOwnerId(memberSession.id), participant,
-          `Review task ${task.humanId} · ${task.title} against its structured goal and done-when criteria.\n\nTask result: ${resultBody}\nLatest structured output: ${JSON.stringify(output ? { summary: output.summary, validation: output.validation, limitations: output.limitations, artifacts } : null)}\n\nInspect relevant project evidence directly when useful. Return an evidence-based verdict and append <!-- qahwa-management-review:{"decision":"approved|changes_requested","feedback":"specific review"} -->.`,
+          `Review task ${task.humanId} · ${task.title} against its immutable structured goal and done-when criteria.\n\nTask result: ${resultBody}\nLatest structured output: ${JSON.stringify(output ? { summary: output.summary, validation: output.validation, limitations: output.limitations, artifacts } : null)}\nOriginal user authorization: ${review.authorization_text}${laterAuthorizations.length ? `\nLater user authorization${laterAuthorizations.length === 1 ? "" : "s"} (exact stored quote${laterAuthorizations.length === 1 ? "" : "s"}): ${laterAuthorizations.join(" | ")}` : ""}\n\nInspect relevant project evidence directly when useful. Keep implementation and specialist sessions separate. Return one evidence-based verdict using exactly one hidden marker:\n- Approved: <!-- qahwa-management-review:{"decision":"approved","feedback":"complete evidence-based review"} -->\n- In-scope corrections already covered by immutable scope and existing authorization: <!-- qahwa-management-review:{"decision":"changes_requested","feedback":"complete exact corrections"} -->\n- Work outside immutable scope or requiring new user authority: <!-- qahwa-management-review:{"decision":"waiting_for_user","feedback":"complete feedback","decisionRequired":"exact user decision required","responsibleOwner":"You"} -->\n- A genuinely non-blocking observation that neither approves nor requests implementation: <!-- qahwa-management-review:{"decision":"observation","feedback":"complete observation"} -->\nNever classify out-of-scope or newly authorized work as changes_requested.`,
           { type: "direct_review", id: review.id }, dispatchId);
       } catch (error) {
         this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='failed',latest_feedback=?,updated_at=? WHERE id=?`)
           .run((error instanceof Error ? error.message : String(error)).slice(0, 10_000), isoNow(), review.id);
-        this.team.failDispatch(dispatchId, error instanceof Error ? error.message : String(error));
+        if (dispatchId) this.team.failDispatch(dispatchId, error instanceof Error ? error.message : String(error));
         throw error;
       }
     }
   }
 
-  async sendMeetingMessage(meetingId: string, body: unknown): Promise<{ meeting: import("../domain/types.js").MeetingSummary; messages: import("../domain/types.js").MeetingMessage[] }> {
+  private async continueDirectReviewWorkflow(reviewId: string): Promise<void> {
+    const review = this.directTaskReview(reviewId);
+    if (review.status === "changes_requested" && review.feedback_delivery_status === "pending") {
+      const feedback = review.latest_feedback ?? "The specialist requested corrections but did not provide details.";
+      const outcome = await this.messageTask(review.task_id,
+        `Automatic specialist correction handoff\n\nReviewer: ${review.snapshot_name} (${review.snapshot_title})\nReview ID: ${review.id}\nClassification: In-scope correction covered by the immutable task scope and existing authorization${review.resolution_authorization_text ? `\nLater user authorization: ${review.resolution_authorization_text}` : ""}\n\nComplete feedback:\n${feedback}\n\nApply only these exact scoped corrections, preserve every explicit authorization gate, validate proportionately, and submit updated review evidence when ready.`,
+        null, `direct-review-feedback:${review.id}:${review.review_count}`);
+      if (outcome.status !== "failed") {
+        this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='pending',feedback_delivery_status='delivered',
+          feedback_delivered_at=?,updated_at=? WHERE id=? AND status='changes_requested' AND feedback_delivery_status='pending'`)
+          .run(isoNow(), isoNow(), review.id);
+        this.setPresence(review.task_id, outcome.status === "queued" ? "Capacity queued" : "Working", "blue",
+          `${review.snapshot_name}'s authorized corrections were delivered to the task session`);
+      } else {
+        this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET feedback_delivery_status='failed',updated_at=? WHERE id=?`)
+          .run(isoNow(), review.id);
+        this.setPresence(review.task_id, "Blocked", "red", `${review.snapshot_name}'s corrections could not be delivered automatically`);
+      }
+      return;
+    }
+    if (review.status === "waiting_for_user") {
+      this.setPresence(review.task_id, "Waiting for user", "orange", review.decision_required ?? "New user authority is required");
+      return;
+    }
+    if (review.status === "approved" || review.status === "observed") {
+      const task = this.tasks.getTask(review.task_id);
+      const output = task.outputs.at(-1);
+      await this.queueDirectTaskReviews(task.id, output?.summary ?? "Latest validated task evidence");
+      const remaining = this.database.db.prepare(`SELECT 1 FROM orchestrator_task_reviewers r
+        JOIN orchestrator_task_creations c ON c.id=r.creation_id
+        WHERE c.task_id=? AND r.status IN ('pending','awaiting_review','changes_requested','waiting_for_user') LIMIT 1`).get(task.id);
+      if (!remaining) this.setPresence(task.id, "Ready for review", "green",
+        "All configured specialists have reviewed the evidence; explicit release gates remain");
+    }
+  }
+
+  private async reconcileDirectReviewDispatches(): Promise<void> {
+    if (this.reconcilingReviews) return;
+    this.reconcilingReviews = true;
+    try { await this.reconcileDirectReviewDispatchesNow(); }
+    finally { this.reconcilingReviews = false; }
+  }
+
+  private async recoverMisroutedDirectReviewDispatches(): Promise<void> {
+    if (this.recoveringMisroutedReviews || this.misroutedReviewsRecovered) return;
+    this.recoveringMisroutedReviews = true;
+    try {
+      const candidates = this.database.db.prepare(`SELECT d.id AS dispatch_id,d.source_id AS task_id,
+        d.participant_id,d.created_at AS dispatched_at,d.updated_at AS delivered_at,d.response_message_id,
+        prompt.owner_id AS prompt_owner_id,prompt.created_at AS prompt_created_at,r.id AS review_id
+        FROM orchestrator_task_reviewers r
+        JOIN orchestrator_task_creations c ON c.id=r.creation_id
+        JOIN tasks t ON t.id=c.task_id AND t.status='in_review'
+        JOIN team_dispatches d ON d.source_type='task' AND d.source_id=c.task_id
+          AND d.participant_type='member' AND d.participant_id=r.member_id
+          AND d.status='delivered' AND d.response_message_id IS NOT NULL AND d.created_at>r.updated_at
+        JOIN chat_messages prompt ON json_extract(prompt.metadata_json,'$.teamDispatchId')=d.id
+          AND json_extract(prompt.metadata_json,'$.responseTarget.type')='task'
+          AND json_extract(prompt.metadata_json,'$.responseTarget.id')=d.source_id
+        ORDER BY d.created_at DESC,prompt.rowid DESC`).all() as Array<{
+          dispatch_id: string; task_id: string; participant_id: string; dispatched_at: string;
+          delivered_at: string; response_message_id: string; prompt_owner_id: string;
+          prompt_created_at: string; review_id: string;
+        }>;
+      const handled = new Set<string>();
+      for (const candidate of candidates) {
+        if (handled.has(candidate.review_id)) continue;
+        const event = this.database.db.prepare(`SELECT json_extract(payload_json,'$.payload.item.text') AS raw_text
+          FROM session_events WHERE owner_type='orchestrator' AND owner_id=? AND event_type='item/completed'
+            AND created_at>=? AND created_at<=?
+            AND json_extract(payload_json,'$.payload.item.type')='agentMessage'
+            AND instr(payload_json,'qahwa-management-review:')>0
+          ORDER BY id DESC LIMIT 1`).get(candidate.prompt_owner_id, candidate.prompt_created_at, candidate.delivered_at) as { raw_text: string } | undefined;
+        if (!event) continue;
+        const review = this.directTaskReview(candidate.review_id);
+        const parsed = parseAgentEnvelope(event.raw_text);
+        if (!parsed.managementReview) continue;
+        handled.add(review.id);
+        if (!this.applyDirectReviewSignal(review, parsed.managementReview, { dispatchedAt: candidate.dispatched_at })) continue;
+        this.database.db.prepare(`UPDATE chat_messages SET metadata_json=json_set(COALESCE(metadata_json,'{}'),
+          '$.specialistReview',?) WHERE id=?`).run(review.id, candidate.response_message_id);
+        this.advanceAfterDirectReview(review, parsed.managementReview, review.snapshot_name);
+      }
+      this.misroutedReviewsRecovered = true;
+    } finally {
+      this.recoveringMisroutedReviews = false;
+    }
+  }
+
+  private async reconcileDirectReviewDispatchesNow(): Promise<void> {
+    type ReconciliationRow = DirectTaskReviewRow & {
+      member_session_id: string | null; reviewer_run_state: SessionRunState | null;
+      active_turn_id: string | null; queued: number;
+    };
+    // Only explicitly ordered workflows may use persisted reviewer positions for
+    // restart recovery. Historical parallel rows have no authoritative ordering,
+    // so reconciliation must leave their policy, reviews, prompts and dispatches intact.
+    const rows = this.database.db.prepare(`SELECT r.*,c.task_id,c.authorization_text,c.review_policy,
+      ms.id AS member_session_id,s.run_state AS reviewer_run_state,s.active_turn_id,
+      EXISTS(SELECT 1 FROM chat_messages cm JOIN pending_messages pm ON pm.message_id=cm.id
+        WHERE cm.owner_type='orchestrator' AND cm.owner_id='team-session:' || ms.id
+          AND json_extract(cm.metadata_json,'$.responseTarget.type')='direct_review'
+          AND json_extract(cm.metadata_json,'$.responseTarget.id')=r.id) AS queued
+      FROM orchestrator_task_reviewers r
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id
+      JOIN tasks t ON t.id=c.task_id
+      LEFT JOIN team_member_sessions ms ON ms.member_id=r.member_id AND ms.task_id=c.task_id AND ms.archived_at IS NULL
+      LEFT JOIN agent_sessions s ON s.owner_type='orchestrator' AND s.owner_id='team-session:' || ms.id
+      WHERE t.status='in_review' AND c.review_policy='sequential' AND r.status='awaiting_review'
+      ORDER BY r.creation_id,r.position,r.created_at,r.rowid`).all() as ReconciliationRow[];
+    if (!rows.length) return;
+
+    const byCreation = new Map<string, ReconciliationRow[]>();
+    for (const row of rows) byCreation.set(row.creation_id, [...(byCreation.get(row.creation_id) ?? []), row]);
+    const requeue = new Map<string, ReconciliationRow>();
+    const activeOrQueued = (row: ReconciliationRow) => Boolean(row.queued)
+      || row.reviewer_run_state === "running" || row.reviewer_run_state === "waiting";
+    for (const reviews of byCreation.values()) {
+      if (reviews.length > 1) {
+        for (const later of reviews.slice(1)) requeue.set(later.id, later);
+        if (!activeOrQueued(reviews[0]!)) requeue.set(reviews[0]!.id, reviews[0]!);
+      } else if (!activeOrQueued(reviews[0]!)) {
+        requeue.set(reviews[0]!.id, reviews[0]!);
+      }
+    }
+    if (!requeue.size) return;
+
+    // Live duplicate turns must acknowledge interruption before their durable review
+    // can be put back in the queue. Restarted turns are already interrupted above.
+    for (const review of requeue.values()) {
+      if (!review.member_session_id || !review.active_turn_id
+        || !["running", "waiting"].includes(review.reviewer_run_state ?? "")) continue;
+      await this.interrupt("orchestrator", memberSessionOwnerId(review.member_session_id));
+    }
+
+    const timestamp = isoNow();
+    this.database.db.transaction(() => {
+      for (const review of requeue.values()) {
+        if (review.member_session_id) {
+          const ownerId = memberSessionOwnerId(review.member_session_id);
+          this.database.db.prepare(`UPDATE chat_messages SET cancelled_at=?
+            WHERE owner_type='orchestrator' AND owner_id=? AND cancelled_at IS NULL
+              AND json_extract(metadata_json,'$.responseTarget.type')='direct_review'
+              AND json_extract(metadata_json,'$.responseTarget.id')=?
+              AND (id IN (SELECT message_id FROM pending_messages)
+                OR json_extract(metadata_json,'$.teamDispatchId') IN (
+                  SELECT id FROM team_dispatches WHERE status='pending'
+                ))`).run(timestamp, ownerId, review.id);
+          this.database.db.prepare(`DELETE FROM pending_messages WHERE message_id IN (
+            SELECT id FROM chat_messages WHERE owner_type='orchestrator' AND owner_id=?
+              AND json_extract(metadata_json,'$.responseTarget.type')='direct_review'
+              AND json_extract(metadata_json,'$.responseTarget.id')=?)`).run(ownerId, review.id);
+        }
+        // The task-visible review trace is written before its dispatch and
+        // specialist prompt. Cancel only traces that never reached a dispatch,
+        // or whose dispatch is still pending, so completed review history from
+        // an earlier cycle with the same durable review id remains intact.
+        this.database.db.prepare(`UPDATE chat_messages SET cancelled_at=?
+          WHERE owner_type='task' AND owner_id=? AND cancelled_at IS NULL
+            AND json_extract(metadata_json,'$.specialistReview')=?
+            AND (NOT EXISTS (SELECT 1 FROM team_dispatches d WHERE d.source_message_id=chat_messages.id)
+              OR EXISTS (SELECT 1 FROM team_dispatches d
+                WHERE d.source_message_id=chat_messages.id AND d.status='pending'))`)
+          .run(timestamp, review.task_id, review.id);
+        this.database.db.prepare(`UPDATE team_dispatches SET status='failed',error=?,updated_at=?
+          WHERE status='pending' AND (
+            id IN (SELECT json_extract(metadata_json,'$.teamDispatchId') FROM chat_messages
+              WHERE json_extract(metadata_json,'$.responseTarget.type')='direct_review'
+                AND json_extract(metadata_json,'$.responseTarget.id')=?)
+            OR source_message_id IN (SELECT id FROM chat_messages
+              WHERE owner_type='task' AND owner_id=?
+                AND json_extract(metadata_json,'$.specialistReview')=?))`)
+          .run("Superseded by durable review-sequence reconciliation; reviewer requeued",
+            timestamp, review.id, review.task_id, review.id);
+        this.database.db.prepare(`UPDATE orchestrator_task_reviewers SET status='pending',updated_at=?
+          WHERE id=? AND status='awaiting_review'`).run(timestamp, review.id);
+      }
+    }).immediate();
+  }
+
+  private async resumeDirectReviewAutomation(): Promise<void> {
+    this.requeueCorrectionsSupersededByFreshEvidence();
+    const corrections = this.database.db.prepare(`SELECT r.id FROM orchestrator_task_reviewers r
+      WHERE r.status='changes_requested' AND r.feedback_delivery_status='pending' ORDER BY r.updated_at`).all() as Array<{ id: string }>;
+    for (const review of corrections) await this.continueDirectReviewWorkflow(review.id);
+    const tasks = this.database.db.prepare(`SELECT DISTINCT c.task_id AS taskId FROM orchestrator_task_creations c
+      JOIN tasks t ON t.id=c.task_id JOIN orchestrator_task_reviewers r ON r.creation_id=c.id
+      WHERE t.status='in_review' AND r.status='pending'
+        AND (r.feedback_delivered_at IS NULL OR EXISTS (
+          SELECT 1 FROM task_outputs fresh WHERE fresh.task_id=c.task_id AND fresh.created_at>r.feedback_delivered_at
+        )) AND (c.review_policy='legacy_parallel' OR NOT EXISTS (
+        SELECT 1 FROM orchestrator_task_reviewers active WHERE active.creation_id=c.id
+          AND active.status IN ('awaiting_review','changes_requested','waiting_for_user','failed')
+      ))`).all() as Array<{ taskId: string }>;
+    for (const { taskId } of tasks) {
+      const task = this.tasks.getTask(taskId);
+      await this.queueDirectTaskReviews(taskId, task.outputs.at(-1)?.summary ?? "Latest validated task evidence");
+    }
+  }
+
+  meetingMessages(meetingId: string): MeetingMessage[] {
+    return this.team.messages(meetingId).map(message => this.attachments.decorateMeetingMessage(message));
+  }
+
+  async sendMeetingMessage(meetingId: string, body: unknown, attachmentIdsInput: unknown = [], deviceId?: string,
+    clientRequestIdInput?: unknown): Promise<{ meeting: import("../domain/types.js").MeetingSummary; messages: MeetingMessage[] }> {
     const text = typeof body === "string" ? body.trim() : "";
-    assertDomain(text.length > 0 && text.length <= 30_000, "Message is required and must be at most 30,000 characters", "invalid_message");
+    assertDomain(Array.isArray(attachmentIdsInput) && attachmentIdsInput.every(id => typeof id === "string"),
+      "Attachment identifiers are invalid", "invalid_attachments");
+    const attachmentIds = attachmentIdsInput as string[];
+    assertDomain(text.length <= 30_000 && (text.length > 0 || attachmentIds.length > 0),
+      "Message or attachment is required and text must be at most 30,000 characters", "invalid_message");
+    const clientRequestId = clientRequestIdInput === undefined ? undefined : String(clientRequestIdInput);
+    assertDomain(clientRequestId === undefined || /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(clientRequestId),
+      "Message request identifier is invalid", "invalid_message_request");
     const meeting = this.team.getMeeting(meetingId);
     assertDomain(meeting.status === "active", "Archived meetings cannot receive messages", "meeting_archived", 409);
-    const sourceMessageId = this.team.addMeetingMessage(meetingId, { speakerType: "user", speakerId: null, speakerName: "You", speakerTitle: "" }, text);
-    const participants = this.team.participantsForMessage(meetingId, text);
-    for (const participant of participants) {
-      const dispatchId = this.team.createDispatch(sourceMessageId, "meeting", meetingId, participant);
-      await this.queueTeamPrompt(meetingParticipantOwnerId(meetingId, participant), participant,
-        `Meeting: ${meeting.title}\nParticipants: ${meeting.participants.map(item => `${item.name} (${item.title})`).join(", ")}\n\nThe user said: ${text}\n\nRespond as ${participant.name}, ${participant.title}. This is a text discussion. Offer your perspective only; do not perform task work or external actions.`,
-        { type: "meeting", id: meetingId }, dispatchId);
+    assertDomain(!attachmentIds.length || Boolean(deviceId), "A paired device session is required for attachments", "attachment_forbidden", 403);
+    const matchesAttempt = (message: MeetingMessage) => message.body === text
+      && JSON.stringify(message.attachments.map(item => item.id)) === JSON.stringify(attachmentIds);
+    const existingAttempt = () => clientRequestId ? this.team.meetingMessageByRequest(meetingId, clientRequestId) : null;
+    const assertMatchingAttempt = (message: MeetingMessage) => assertDomain(matchesAttempt(message),
+      "This send attempt was already used for different meeting content", "meeting_send_conflict", 409);
+    const save = this.database.db.transaction((): { sourceMessageId: string; prepared: PreparedAttachment[] } => {
+      const existing = existingAttempt();
+      if (existing) {
+        assertMatchingAttempt(existing);
+        return { sourceMessageId: existing.id, prepared: this.attachments.forMeetingMessage(existing.id) };
+      }
+      const prepared = attachmentIds.length
+        ? this.attachments.prepareForMessage("orchestrator", meetingAttachmentOwnerId(meetingId), deviceId!, attachmentIds) : [];
+      const id = this.team.addMeetingMessage(meetingId,
+        { speakerType: "user", speakerId: null, speakerName: "You", speakerTitle: "" }, text,
+        prepared.map(({ path: _path, ...attachment }) => attachment), clientRequestId);
+      this.attachments.claimForMeetingMessage(attachmentIds, id, meetingAttachmentOwnerId(meetingId), deviceId!);
+      for (const participant of this.team.participantsForMessage(meetingId, text)) this.team.createDispatch(id, "meeting", meetingId, participant);
+      return { sourceMessageId: id, prepared };
+    });
+    let saved: { sourceMessageId: string; prepared: PreparedAttachment[] };
+    try {
+      saved = save.immediate();
+    } catch (error) {
+      // A second process may win the unique request-id race before this connection obtains its write lock.
+      const raced = existingAttempt();
+      if (!raced) throw error;
+      assertMatchingAttempt(raced);
+      saved = { sourceMessageId: raced.id, prepared: this.attachments.forMeetingMessage(raced.id) };
     }
-    return { meeting: this.team.getMeeting(meetingId), messages: this.team.messages(meetingId) };
+    const { sourceMessageId, prepared } = saved;
+    const pending = this.database.db.prepare(`SELECT id,participant_type,participant_id FROM team_dispatches
+      WHERE source_message_id=? AND source_type='meeting' AND status='pending' ORDER BY created_at,rowid`)
+      .all(sourceMessageId) as Array<{ id: string; participant_type: import("../domain/types.js").MeetingParticipant["type"]; participant_id: string }>;
+    for (const dispatch of pending) {
+      const alreadyQueued = this.database.db.prepare(`SELECT 1 FROM chat_messages
+        WHERE json_extract(metadata_json,'$.teamDispatchId')=? LIMIT 1`).get(dispatch.id);
+      if (alreadyQueued) continue;
+      const participant = meeting.participants.find(item => item.type === dispatch.participant_type && item.id === dispatch.participant_id);
+      if (!participant) { this.team.failDispatch(dispatch.id, "Meeting participant is unavailable"); continue; }
+      const userMessage = text || "The user attached files for review.";
+      const prompt = appendAttachmentPaths(
+        `Meeting: ${meeting.title}\nParticipants: ${meeting.participants.map(item => `${item.name} (${item.title})`).join(", ")}\n\nThe user said: ${userMessage}\n\nRespond as ${participant.name}, ${participant.title}. Offer your perspective only; do not perform task work or external actions.`,
+        prepared);
+      try {
+        await this.queueTeamPrompt(meetingParticipantOwnerId(meetingId, participant), participant, prompt,
+          { type: "meeting", id: meetingId }, dispatch.id, prepared, sourceMessageId);
+      } catch (error) {
+        const saved = this.database.db.prepare(`SELECT 1 FROM chat_messages WHERE json_extract(metadata_json,'$.teamDispatchId')=? LIMIT 1`).get(dispatch.id);
+        if (!saved) this.team.failDispatch(dispatch.id, error instanceof Error ? error.message : String(error));
+      }
+    }
+    return { meeting: this.team.getMeeting(meetingId), messages: this.meetingMessages(meetingId) };
   }
 
   private coordinationTaskName(taskId: string): string {
@@ -2527,7 +3232,7 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         phase: "steer", threadId: session.threadId, expectedTurnId,
       });
       try {
-        const accepted = await this.codex.request("turn/steer", { threadId: session.threadId, expectedTurnId, clientUserMessageId: messageId,
+        const accepted = await this.runtimeForOwner("task", task.id).request("turn/steer", { threadId: session.threadId, expectedTurnId, clientUserMessageId: messageId,
           input: [{ type: "text", text: `${name} guidance authorized by the user: ${message}` }] }, 30_000);
         assertDomain(accepted?.turnId === expectedTurnId, "Codex returned an unexpected guidance acknowledgement", "guidance_ack_mismatch", 503);
         this.database.db.transaction(() => {
@@ -2762,7 +3467,13 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
   }
 
   private async resumeQueues(): Promise<void> {
+    if (this.closed) return;
+    await this.recoverMisroutedDirectReviewDispatches();
+    if (this.closed) return;
+    await this.reconcileDirectReviewDispatches();
+    if (this.closed) return;
     await this.drainPendingMessages();
+    if (!this.closed) await this.resumeDirectReviewAutomation();
     if (!this.closed) await this.drainSchedulerQueue();
   }
 

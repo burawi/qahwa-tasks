@@ -69,6 +69,12 @@ setInterval(() => {
   database.db.prepare("INSERT INTO paired_devices (id, name, public_key, created_at, last_seen_at) VALUES ('device', 'Test', '', ?, ?)").run(timestamp, timestamp);
   let attachments = new AttachmentService(database, join(root, "temporary"));
   let agents = new ControlledAgents(database, tasks, attachments);
+  const useSharedFixtureRuntime = (instance: ControlledAgents) => {
+    const runtime = Reflect.get(instance, "codex");
+    Reflect.set(instance, "runtimeForOwner", () => runtime);
+    return instance;
+  };
+  agents = useSharedFixtureRuntime(agents);
   const f = {
     root, config,
     get database() { return database; }, get tasks() { return tasks; },
@@ -99,7 +105,7 @@ setInterval(() => {
       agents.close(); attachments.close(); database.close();
       database = new AppDatabase(config); tasks = new TaskService(database);
       attachments = new AttachmentService(database, join(root, "temporary"));
-      agents = new ControlledAgents(database, tasks, attachments);
+      agents = useSharedFixtureRuntime(new ControlledAgents(database, tasks, attachments));
     },
     close() {
       agents.close(); attachments.close(); database.close();

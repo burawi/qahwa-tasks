@@ -31,7 +31,7 @@ const dispose = (op: Operation) => {
   if (op.attachmentId) void api.removeAttachment(op.attachmentId).catch(() => undefined);
 };
 
-export function useVoiceMessage(mode: "task" | "orchestrator", taskId?: string) {
+export function useVoiceMessage(mode: "task" | "orchestrator" | "meeting", ownerId?: string) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState("");
@@ -49,7 +49,7 @@ export function useVoiceMessage(mode: "task" | "orchestrator", taskId?: string) 
     const onPageHide = () => cancel();
     window.addEventListener("pagehide", onPageHide);
     return () => { window.removeEventListener("pagehide", onPageHide); if (operation.current) dispose(operation.current); operation.current = null; };
-  }, [mode, taskId, cancel]);
+  }, [mode, ownerId, cancel]);
 
   const transcribe = async (op: Operation) => {
     if (!op.blob || op.cancelled || op.processing) return;
@@ -58,11 +58,11 @@ export function useVoiceMessage(mode: "task" | "orchestrator", taskId?: string) 
     try {
       const ext = op.blob.type.includes("mp4") ? "m4a" : op.blob.type.includes("ogg") ? "ogg" : "webm";
       if (!op.attachmentId) {
-        const attachment = await api.uploadAttachment(mode, taskId, new File([op.blob], `voice.${ext}`, { type: op.blob.type }), () => {});
+        const attachment = await api.uploadAttachment(mode, ownerId, new File([op.blob], `voice.${ext}`, { type: op.blob.type }), () => {});
         op.attachmentId = attachment.id;
       }
       if (op.cancelled) { void api.removeAttachment(op.attachmentId).catch(() => undefined); return; }
-      let { transcription } = op.jobId ? await api.voiceTranscription(op.jobId) : await api.startVoiceTranscription(mode, taskId, op.attachmentId);
+      let { transcription } = op.jobId ? await api.voiceTranscription(op.jobId) : await api.startVoiceTranscription(mode, ownerId, op.attachmentId);
       op.jobId = transcription.id;
       if (op.cancelled) { void api.cancelVoiceTranscription(op.jobId).catch(() => undefined); return; }
       const deadline = Date.now() + 12 * 60_000;

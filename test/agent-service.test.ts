@@ -4,13 +4,16 @@ import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementatio
 import { readFileSync } from "node:fs";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
-  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true} -->`);
+  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true,"validation":["Typecheck passed"],"limitations":["Not deployed"],"artifacts":["artifacts/dashboard.png"]} -->`);
   assert.equal(response.body, "Implemented the dashboard.");
   assert.equal(response.message, "Implemented");
   assert.equal(response.tone, "green");
   assert.equal(response.surface, "design");
   assert.equal(response.design?.artboard.width, 390);
   assert.equal(response.review, true);
+  assert.deepEqual(response.reviewEvidence, {
+    validation: ["Typecheck passed"], limitations: ["Not deployed"], artifacts: ["artifacts/dashboard.png"],
+  });
   assert.deepEqual(response.startTasks, ["WAS-0012"]);
   assert.deepEqual(response.priorityTasks, ["WAS-0012", "QAH-0004"]);
 });
@@ -38,6 +41,21 @@ test("agent envelope extracts intake, silent supervision, and structured orchest
     { type: "interrupt", taskId: "MAJ-0003", authorization: "pause it" },
     { type: "priority", taskIds: ["MAJ-0003", "WAS-0001"], authorization: "use this order" },
   ]);
+});
+
+test("review envelopes preserve authority boundaries and explicit user resolutions", () => {
+  const review = parseAgentEnvelope(`Needs a user choice.
+<!-- qahwa-management-review:{"decision":"waiting_for_user","feedback":"Add unrelated billing work","decisionRequired":"Authorize or reject billing work","responsibleOwner":"Product owner"} -->
+<!-- qahwa-actions:[{"type":"task_review_resolution","reviewId":"review-1","resolution":"authorize","message":"Authorize billing work","authorization":"Authorize billing work"}] -->`);
+  assert.deepEqual(review.managementReview, {
+    decision: "waiting_for_user", feedback: "Add unrelated billing work",
+    decisionRequired: "Authorize or reject billing work", responsibleOwner: "Product owner",
+  });
+  assert.deepEqual(review.actions, [{
+    type: "task_review_resolution", reviewId: "review-1", resolution: "authorize",
+    message: "Authorize billing work", authorization: "Authorize billing work",
+  }]);
+  assert.equal(review.body, "Needs a user choice.");
 });
 
 test("spawned Codex sessions cannot inherit Orca routing or parent session identity", () => {

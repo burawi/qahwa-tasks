@@ -25,11 +25,13 @@ export function TaskCard({ task, onOpen, selectionMode = false, selected = false
   const unread = task.conversation?.unreadCount ?? 0;
   const latest = task.conversation?.latestMessage;
   const activityAt = task.conversation?.activityAt ?? task.createdAt;
-  const status = task.outcome === "cancelled" ? "Cancelled" : statusLabels[task.status];
+  const status = task.outcome === "cancelled" ? "Cancelled" : task.workflow?.label ?? statusLabels[task.status];
+  const tone = task.workflow ? ({ blocked: "red", waiting_for_user: "orange", ready_for_review: "green",
+    working: "blue", reviewing: "blue", capacity_queued: "blue" } as const)[task.workflow.state] : task.tone;
   return <div className={`conversation-item${task.pinnedAt ? " is-pinned" : ""}${selectionMode ? " selection-mode" : ""}`}><button
     type="button"
     style={projectColorStyle(task.projectId)}
-    className={`task-row conversation-row tone-${task.tone}${unread > 0 ? " is-unread" : ""}${selected ? " is-selected" : ""}`}
+    className={`task-row conversation-row tone-${tone}${unread > 0 ? " is-unread" : ""}${selected ? " is-selected" : ""}`}
     data-task-id={task.id}
     aria-pressed={selectionMode ? selected : undefined}
     onPointerDown={(event) => {
@@ -66,7 +68,12 @@ export function TaskCard({ task, onOpen, selectionMode = false, selected = false
     <span className="conversation-copy">
       <span className="conversation-heading"><strong className="conversation-title" dir="auto">{task.title}</strong><RunningIndicator running={task.sessionState === "running"} label="Task running" /></span>
       <span className="conversation-preview" dir="auto">{latest ? <>{latest.role === "user" && <span>You: </span>}{latest.preview}</> : task.sessionKind === "terminal" ? "Interactive server shell" : "No messages yet"}</span>
-      {task.smartMessage && <span className="smart-status conversation-remark"><i aria-hidden="true" /><span dir="auto">{task.smartMessage}</span></span>}
+      {task.workflow
+        ? <span className="smart-status conversation-remark workflow-remark"><i aria-hidden="true" /><span dir="auto">
+          <span className="workflow-owner"><b>{task.workflow.owner}</b>{task.workflow.ownerActive && <RunningIndicator running label={`${task.workflow.owner} is actively preparing review feedback`} />}</span>
+          <span aria-hidden="true"> · </span>{task.workflow.nextAction}
+        </span></span>
+        : task.smartMessage && <span className="smart-status conversation-remark"><i aria-hidden="true" /><span dir="auto">{task.smartMessage}</span></span>}
       <span className="conversation-context">
         <span className="conversation-project">{task.projectName}</span>
         <span className="conversation-id">{task.humanId}</span>

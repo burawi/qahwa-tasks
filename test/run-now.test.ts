@@ -20,6 +20,7 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
   const neighbor = tasks.createTask({ projectId: project.id, title: "Other conversation", status: "todo" }, "user");
   const attachments = new AttachmentService(database, join(root, "files"));
   const agents = new AgentService(database, tasks, attachments), ownerId = ownerType === "task" ? task.id : "main";
+  clearInterval(Reflect.get(agents, "scheduleTimer"));
   agents.workspace(ownerType, ownerId);
   database.db.prepare("UPDATE agent_sessions SET run_state='running', intake_state='ready', thread_id='existing-thread' WHERE owner_type=? AND owner_id=?").run(ownerType, ownerId);
   const snapshot = agents.capacity();
@@ -29,6 +30,7 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
     method: string;
     params: any;
   }[] = [], client = Reflect.get(agents, "codex");
+  t.mock.method(agents as any, "runtimeForOwner", () => client);
   t.mock.method(client, "initialize", async () => { await gate; });
   t.mock.method(client, "request", async (method: string, params: unknown) => {
     requests.push({ method, params });
@@ -47,7 +49,7 @@ function fixture(t: TestContext, ownerType: SessionOwnerType) {
     idle() { slots = 1; database.db.prepare("UPDATE agent_sessions SET run_state='idle',active_turn_id=NULL WHERE owner_type=? AND owner_id=?").run(ownerType, ownerId); },
     slots(n: number) { slots = n; }, gate(p: Promise<void> | undefined) { gate = p; }, reject(value: boolean) { rejectStart = value; },
   };
-  t.after(() => { agents.close(); attachments.close(); database.close(); rmSync(root, { recursive: true, force: true }); });
+  t.after(async () => { await agents.close(); attachments.close(); database.close(); rmSync(root, { recursive: true, force: true }); });
   return f;
 }
 for (const mode of ["task", "orchestrator"] as const) {
@@ -184,7 +186,7 @@ test('Run now does not execute future scheduled followups', async (t) => {
 });
 test('Run now endpoints enforce authentication, origin, ownership and dispatch the existing message once', async (t) => {
   const f = fixture(t, 'task');
-  f.agents.close();
+  await f.agents.close();
   const stamp = new Date().toISOString();
   f.database.db.prepare("INSERT INTO paired_devices(id,name,public_key,created_at,last_seen_at) VALUES ('device','Test','',?,?)").run(stamp, stamp);
   const token = new AuthService(f.database, 365).createSession('test', '127.0.0.1', 'device').token;
@@ -194,6 +196,7 @@ test('Run now endpoints enforce authentication, origin, ownership and dispatch t
   const calls: string[] = [];
   t.mock.method(AgentService.prototype, 'runPendingMessageNow', async function (this: AgentService, type: SessionOwnerType, id: string, message: string) {
     const client = Reflect.get(this, 'codex');
+    Reflect.set(this, 'runtimeForOwner', () => client);
     t.mock.method(client, 'initialize', async () => { });
     t.mock.method(client, 'request', async (method: string) => { calls.push(method); return method === 'thread/start' ? { thread: { id: 'api-thread' } } : method === 'turn/start' ? { turn: { id: 'api-turn' } } : {}; });
     return actual.call(this, type, id, message);

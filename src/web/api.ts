@@ -279,7 +279,7 @@ async function uploadProjectLogo(id: string, file: File): Promise<{ project: Pro
 export interface PendingAttachment extends ChatAttachment { progress: number }
 
 async function uploadAttachment(
-  mode: "task" | "orchestrator" | "draft",
+  mode: "task" | "orchestrator" | "meeting" | "draft",
   ownerId: string | undefined,
   file: File,
   onProgress: (progress: number) => void,
@@ -287,7 +287,9 @@ async function uploadAttachment(
 ): Promise<ChatAttachment> {
   const checkCancelled = () => { if (signal?.aborted) throw new DOMException("Upload cancelled", "AbortError"); };
   checkCancelled();
-  const base = mode === "draft" ? `/api/task-drafts/${encodeURIComponent(ownerId ?? "")}` : mode === "task" ? `/api/tasks/${encodeURIComponent(ownerId ?? "")}` : "/api/orchestrator";
+  const base = mode === "draft" ? `/api/task-drafts/${encodeURIComponent(ownerId ?? "")}`
+    : mode === "task" ? `/api/tasks/${encodeURIComponent(ownerId ?? "")}`
+    : mode === "meeting" ? `/api/meetings/${encodeURIComponent(ownerId ?? "")}` : "/api/orchestrator";
   const initiated = await request<{ attachment: ChatAttachment & { chunkBytes: number } }>(`${base}/attachments`, {
     method: "POST",
     body: JSON.stringify({ filename: file.name, mediaType: file.type || "application/octet-stream", size: file.size }),
@@ -358,7 +360,7 @@ const assetCache = new Map<string, Promise<Blob>>();
 // Binary files travel through the paired connection, never an unauthenticated URL.
 // Keep each RPC bounded so large media does not create a single huge JSON frame.
 export async function fetchMessageFile(path: string, options: { attachment?: boolean; size?: number; mediaType?: string; signal?: AbortSignal; limit?: number } = {}): Promise<Blob> {
-  if (!/^\/api\/(?:tasks\/[^/]+\/(?:outputs\/[^/]+\/artifacts\/\d+|attachments\/[^/?]+|files\/[^/?]+)|orchestrator\/(?:attachments|files)\/[^/?]+)(?:\?[^#]*)?$/.test(path)) throw new Error("File URL is not supported");
+  if (!/^\/api\/(?:tasks\/[^/]+\/(?:outputs\/[^/]+\/artifacts\/\d+|attachments\/[^/?]+|files\/[^/?]+)|orchestrator\/(?:attachments|files)\/[^/?]+|meetings\/[^/]+\/attachments\/[^/?]+)(?:\?[^#]*)?$/.test(path)) throw new Error("File URL is not supported");
   const chunks: ArrayBuffer[] = [];
   let total = options.size;
   let offset = 0;
@@ -417,7 +419,7 @@ export const api = {
   createMeeting: (title: string, participantIds: string[]) => request<{ meeting: MeetingSummary }>("/api/meetings", { method: "POST", body: JSON.stringify({ title, participantIds }) }),
   meeting: (id: string) => request<{ meeting: MeetingSummary; messages: MeetingMessage[] }>(`/api/meetings/${encodeURIComponent(id)}`),
   archiveMeeting: (id: string) => request<{ meeting: MeetingSummary }>(`/api/meetings/${encodeURIComponent(id)}/archive`, { method: "POST" }),
-  sendMeetingMessage: (id: string, message: string) => request<{ meeting: MeetingSummary; messages: MeetingMessage[] }>(`/api/meetings/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify({ message }) }),
+  sendMeetingMessage: (id: string, message: string, attachmentIds: string[] = [], requestId: string = crypto.randomUUID()) => request<{ meeting: MeetingSummary; messages: MeetingMessage[] }>(`/api/meetings/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify({ message, attachmentIds, requestId }) }),
   createTerminal: (projectId: string, creationKey: string) => request<{ task: TaskDetail; terminal: TerminalView }>("/api/terminals", { method: "POST", body: JSON.stringify({ projectId, creationKey }) }),
   terminal: (id: string, generation?: string, cursor?: number, wait = false) => request<{ terminal: TerminalView }>(`/api/tasks/${encodeURIComponent(id)}/terminal?${new URLSearchParams({ ...(generation ? { generation } : {}), ...(cursor === undefined ? {} : { cursor: String(cursor) }), ...(wait ? { wait: "1" } : {}) })}`),
   terminalInput: (id: string, generation: string, inputId: string, data: string, binary = false, message?: string) => request<{ accepted: boolean }>(`/api/tasks/${encodeURIComponent(id)}/terminal/input`, { method: "POST", body: JSON.stringify({ generation, inputId, data, binary, message }) }),
@@ -523,8 +525,8 @@ export const api = {
   uploadAttachment,
   cancelTaskDraft: (id: string) => request<void>(`/api/task-drafts/${encodeURIComponent(id)}`, { method: "DELETE" }),
   voiceAvailable: () => request<{ available: boolean }>("/api/voice-transcriptions/availability"),
-  startVoiceTranscription: (mode: "task" | "orchestrator", taskId: string | undefined, attachmentId: string) => request<{ transcription: import("../domain/voice").VoiceTranscription }>(
-    `${mode === "task" ? `/api/tasks/${encodeURIComponent(taskId ?? "")}` : "/api/orchestrator"}/voice/${encodeURIComponent(attachmentId)}/transcription`, { method: "POST" }),
+  startVoiceTranscription: (mode: "task" | "orchestrator" | "meeting", ownerId: string | undefined, attachmentId: string) => request<{ transcription: import("../domain/voice").VoiceTranscription }>(
+    `${mode === "task" ? `/api/tasks/${encodeURIComponent(ownerId ?? "")}` : mode === "meeting" ? `/api/meetings/${encodeURIComponent(ownerId ?? "")}` : "/api/orchestrator"}/voice/${encodeURIComponent(attachmentId)}/transcription`, { method: "POST" }),
   voiceTranscription: (id: string) => request<{ transcription: import("../domain/voice").VoiceTranscription }>(`/api/voice-transcriptions/${encodeURIComponent(id)}`),
   cancelVoiceTranscription: (id: string) => request<void>(`/api/voice-transcriptions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   removeAttachment: (id: string) => request<void>(`/api/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),

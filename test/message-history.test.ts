@@ -198,6 +198,7 @@ test("older attachments, pending controls and scheduled followups retain full sa
     assert.equal(refreshed?.messages.find(m => m.id === "task-11")?.metadata?.attachments?.[0]?.status, "expired");
     assert.equal(refreshed?.messages.find(m => m.id === "future-message")?.schedule?.state, "cancelled");
     assert.equal(f.agents.workspace("task", f.task.id).session.threadId, "saved-context-thread");
-    assert.equal(f.database.db.prepare("SELECT COUNT(*) AS n FROM chat_messages").get()?.n, 245);
+    assert.equal(f.database.db.prepare("SELECT COUNT(*) AS n FROM chat_messages WHERE owner_type='task' AND owner_id=?")
+      .get(f.task.id)?.n, 245);
   } finally { files.close(); f.close(); }
 });

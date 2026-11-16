@@ -101,7 +101,9 @@ test("only the orchestrator prompt receives transcript context without device cr
     assert.match(prompt, /Transcript line one/);
     assert.match(prompt, /Transcript line two/);
     assert.doesNotMatch(prompt, new RegExp(credentialMarker));
-    assert.equal(start.params.sandboxPolicy.type, "readOnly");
+    assert.equal(start.params.sandboxPolicy.type, "dangerFullAccess");
+    const startedThread = f.requests().filter(request => request.method === "thread/start").at(-1)!;
+    assert.match(startedThread.params.developerInstructions, /Never perform project implementation/);
     const session = f.agents.workspace("orchestrator", "main").session;
     f.emit([{ method: "turn/completed", params: { threadId: session.threadId, turn: { id: session.activeTurnId, status: "completed" } } }]);
     await until(() => f.agents.workspace("orchestrator", "main").session.runState === "idle", "Orchestrator turn did not settle");
@@ -341,13 +343,13 @@ test("direct task results return through the specialist correction and approval 
           text: `The hierarchy needs correction.\n<!-- qahwa-management-review:{"decision":"changes_requested","feedback":"Strengthen the hierarchy"} -->` } } },
       { method: "turn/completed", params: { threadId: session.threadId, turn: { id: session.activeTurnId, status: "completed" } } },
     ]);
-    await until(() => review().status === "changes_requested", "Specialist corrections were not recorded");
+    await until(() => review().status === "pending" && review().feedback_delivery_status === "delivered",
+      "Specialist corrections were not delivered automatically");
     await until(() => f.agents.workspace("orchestrator", ownerId).session.runState === "idle", "First specialist review did not finish");
-    await (f.agents as any).applyOrchestratorActions([{ type: "task_review_feedback", reviewId: review().id,
-      message: "Apply Jamil's hierarchy correction", authorization }], undefined, null, "direct-feedback", null);
-    assert.equal(review().status, "pending");
     assert.ok(f.agents.workspace("task", task.id).messages.some(message => message.body.includes("Strengthen the hierarchy")));
 
+    f.tasks.transition(task.id, { to: "in_progress" }, "codex");
+    f.tasks.submitForReview(task.id, { summary: "Corrected redesign result" }, "codex");
     await (f.agents as any).queueDirectTaskReviews(task.id, "Corrected redesign result");
     await until(() => Boolean(f.agents.workspace("orchestrator", ownerId).session.activeTurnId), "Second specialist review did not start");
     session = f.agents.workspace("orchestrator", ownerId).session;
@@ -402,13 +404,20 @@ test("meeting work is delegated once and returned to the requesting specialist f
     await until(() => f.agents.workspace("task", task.id).session.threadId !== taskSession.threadId
       && Boolean(f.agents.workspace("task", task.id).session.activeTurnId), "Task implementation handoff did not start");
     taskSession = f.agents.workspace("task", task.id).session;
+    if (f.tasks.getTask(task.id).status === "todo") f.tasks.transition(task.id, { to: "in_progress" }, "codex");
+    writeFileSync(join(f.root, "review-proof.png"), Buffer.from("rendered evidence captured"));
     f.emit([
       { method: "item/completed", params: { threadId: taskSession.threadId, turnId: taskSession.activeTurnId,
         item: { id: "task-result", type: "agentMessage", phase: "final_answer",
-          text: `Evidence captured and validated.\n<!-- qahwa:{"message":"Evidence ready","tone":"green","surface":"chat","review":true} -->` } } },
+          text: `Evidence captured and validated.\n<!-- qahwa:{"message":"Evidence ready","tone":"green","surface":"chat","review":true,"validation":["Rendered workflow passed"],"limitations":["No deployment"],"artifacts":["review-proof.png"]} -->` } } },
       { method: "turn/completed", params: { threadId: taskSession.threadId, turn: { id: taskSession.activeTurnId, status: "completed" } } },
     ]);
     await until(() => f.agents.team.getManagementRequest(request.id).status === "awaiting_review", "Task result was not handed to the specialist");
+    const output = f.tasks.getTask(task.id).outputs.at(-1)!;
+    assert.deepEqual(output.validation, ["Rendered workflow passed"]);
+    assert.deepEqual(output.limitations, ["No deployment"]);
+    assert.equal(output.artifacts[0]?.filename, "review-proof.png");
+    assert.equal(output.artifacts[0]?.availability, "available");
     await until(() => Boolean(f.agents.workspace("orchestrator", memberOwner).session.activeTurnId), "Specialist review turn did not start");
     memberSession = f.agents.workspace("orchestrator", memberOwner).session;
     assert.ok(memberSession.activeTurnId);

@@ -6,7 +6,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { workspacePoll } from "./workspace-poll.js";
 import { MessageReadService } from "./message-read-service.js";
 import type { WorkspaceCursor, MessagePageQuery } from "../domain/types.js";
-import { DomainError } from "../domain/errors.js";
+import { DomainError, assertDomain } from "../domain/errors.js";
 import { MAX_PROJECT_LOGO_BYTES, PROJECT_LOGO_SIZE_ERROR } from "../domain/project-logo.js";
 import type { RichTextDocument, TaskStatus } from "../domain/types.js";
 import { AuthService } from "./auth.js";
@@ -19,7 +19,7 @@ import { AgentService } from "./agent-service.js";
 import { TaskIdleNotifier } from "./task-idle-notifier.js";
 import { AppPushService } from "./app-push-service.js";
 import { PairingService } from "./pairing.js";
-import { ATTACHMENT_LIMITS, AttachmentService } from "./attachment-service.js";
+import { ATTACHMENT_LIMITS, AttachmentService, meetingAttachmentOwnerId } from "./attachment-service.js";
 import { getOrchestratorSettings, saveOrchestratorSettings } from "./orchestrator-settings.js";
 import { MAX_USER_AVATAR_BYTES, USER_AVATAR_SIZE_ERROR } from "../domain/user-avatar.js";
 import { getUserAvatar, resetUserAvatar, saveUserAvatar, userAvatarImage } from "./user-avatar.js";
@@ -240,7 +240,7 @@ export async function buildApp(config: Config, database = new AppDatabase(config
     await terminals.close();
     await voice.close();
     await titles.close();
-    agents.close();
+    await agents.close();
     attachments.close();
     database.close();
   });
@@ -479,11 +479,14 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   app.post<{ Body: { title?: unknown; participantIds?: unknown } }>("/api/meetings", async (request, reply) =>
     reply.code(201).send({ meeting: context.agents.team.createMeeting(request.body ?? {}) }));
   app.get<{ Params: { id: string } }>("/api/meetings/:id", async request => ({
-    meeting: context.agents.team.getMeeting(request.params.id), messages: context.agents.team.messages(request.params.id),
+    meeting: context.agents.team.getMeeting(request.params.id), messages: context.agents.meetingMessages(request.params.id),
   }));
   app.post<{ Params: { id: string } }>("/api/meetings/:id/archive", async request => ({ meeting: context.agents.team.archiveMeeting(request.params.id) }));
-  app.post<{ Params: { id: string }; Body: { message?: unknown } }>("/api/meetings/:id/messages", async (request, reply) =>
-    reply.code(202).send(await context.agents.sendMeetingMessage(request.params.id, request.body?.message)));
+  app.post<{ Params: { id: string }; Body: { message?: unknown; attachmentIds?: unknown; requestId?: unknown } }>("/api/meetings/:id/messages", async (request, reply) => {
+    const deviceId = context.auth.requireSession(request).deviceId;
+    return reply.code(202).send(await context.agents.sendMeetingMessage(request.params.id, request.body?.message,
+      request.body?.attachmentIds, deviceId, request.body?.requestId));
+  });
   app.get<{ Params: { id: string } }>("/api/tasks/:id/unread", async (request) => ({
     readState: reads.unread("task", context.tasks.getTask(request.params.id).id),
   }));
@@ -587,6 +590,13 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
       return reply.code(202).send({ transcription: await context.voice.start(attachment!, deviceId, () => context.attachments.remove(attachment!.id, deviceId)) });
     });
   }
+  app.post<{ Params: { id: string; attachmentId: string } }>("/api/meetings/:id/voice/:attachmentId/transcription", async (request, reply) => {
+    const meeting = context.agents.team.getMeeting(request.params.id);
+    assertDomain(meeting.status === "active", "Archived meetings cannot receive messages", "meeting_archived", 409);
+    const deviceId = context.auth.requireSession(request).deviceId;
+    const [attachment] = context.attachments.prepareForMessage("orchestrator", meetingAttachmentOwnerId(meeting.id), deviceId, [request.params.attachmentId]);
+    return reply.code(202).send({ transcription: await context.voice.start(attachment!, deviceId, () => context.attachments.remove(attachment!.id, deviceId)) });
+  });
   app.get<{ Params: { id: string } }>("/api/voice-transcriptions/:id", async (request) => ({
     transcription: context.voice.get(request.params.id, context.auth.requireSession(request).deviceId),
   }));
@@ -602,6 +612,12 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   app.post<{ Body: { filename?: unknown; mediaType?: unknown; size?: unknown } }>("/api/orchestrator/attachments", async (request, reply) => {
     const deviceId = context.auth.requireSession(request).deviceId;
     return reply.code(201).send({ attachment: context.attachments.initiate("orchestrator", "main", deviceId, request.body) });
+  });
+  app.post<{ Params: { id: string }; Body: { filename?: unknown; mediaType?: unknown; size?: unknown } }>("/api/meetings/:id/attachments", async (request, reply) => {
+    const meeting = context.agents.team.getMeeting(request.params.id);
+    assertDomain(meeting.status === "active", "Archived meetings cannot receive attachments", "meeting_archived", 409);
+    const deviceId = context.auth.requireSession(request).deviceId;
+    return reply.code(201).send({ attachment: context.attachments.initiate("orchestrator", meetingAttachmentOwnerId(meeting.id), deviceId, request.body) });
   });
   app.put<{ Params: { id: string; chunk: string }; Body: Buffer }>("/api/attachments/:id/chunks/:chunk", async (request) => {
     const deviceId = context.auth.requireSession(request).deviceId;
@@ -623,6 +639,11 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
   });
   app.get<{ Params: { attachmentId: string }; Querystring: { offset?: string } }>("/api/orchestrator/attachments/:attachmentId", async (request, reply) => {
     const result = context.attachments.resolveDownload("orchestrator", "main", request.params.attachmentId);
+    return sendAttachment(reply, result.path, result.attachment.filename, result.attachment.mediaType, result.attachment.size, request.query.offset);
+  });
+  app.get<{ Params: { id: string; attachmentId: string }; Querystring: { offset?: string } }>("/api/meetings/:id/attachments/:attachmentId", async (request, reply) => {
+    const meeting = context.agents.team.getMeeting(request.params.id);
+    const result = context.attachments.resolveDownload("orchestrator", meetingAttachmentOwnerId(meeting.id), request.params.attachmentId);
     return sendAttachment(reply, result.path, result.attachment.filename, result.attachment.mediaType, result.attachment.size, request.query.offset);
   });
   app.post<{ Params: { requestId: string }; Body: { approved?: boolean; answers?: Record<string, string> } }>(

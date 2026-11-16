@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS attachment_uploads (
   owner_id TEXT NOT NULL,
   device_id TEXT NOT NULL REFERENCES paired_devices(id) ON DELETE CASCADE,
   message_id TEXT REFERENCES chat_messages(id) ON DELETE SET NULL,
+  meeting_message_id TEXT REFERENCES meeting_messages(id) ON DELETE SET NULL,
   filename TEXT NOT NULL,
   media_type TEXT NOT NULL,
   declared_size INTEGER NOT NULL,
@@ -518,6 +519,8 @@ CREATE TABLE IF NOT EXISTS meeting_messages (
   speaker_name TEXT NOT NULL,
   speaker_title TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL,
+  attachments_json TEXT NOT NULL DEFAULT '[]',
+  client_request_id TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_meeting_messages_meeting ON meeting_messages(meeting_id, created_at);
@@ -580,6 +583,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_task_creations (
   project_id TEXT NOT NULL REFERENCES projects(id),
   task_id TEXT NOT NULL REFERENCES tasks(id),
   reviewer_ids_json TEXT NOT NULL DEFAULT '[]',
+  review_policy TEXT NOT NULL DEFAULT 'legacy_parallel' CHECK(review_policy IN ('legacy_parallel','sequential')),
   created_at TEXT NOT NULL,
   UNIQUE(source_key, action_key)
 );
@@ -592,8 +596,17 @@ CREATE TABLE IF NOT EXISTS orchestrator_task_reviewers (
   member_id TEXT NOT NULL REFERENCES team_members(id),
   snapshot_name TEXT NOT NULL,
   snapshot_title TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','awaiting_review','changes_requested','approved','failed')),
+  position INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','awaiting_review','changes_requested','waiting_for_user','observed','approved','failed')),
   latest_feedback TEXT,
+  feedback_kind TEXT,
+  decision_required TEXT,
+  responsible_owner TEXT,
+  feedback_delivery_status TEXT,
+  feedback_delivered_at TEXT,
+  resolution_status TEXT,
+  resolution_text TEXT,
+  resolution_authorization_text TEXT,
   review_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -676,9 +689,66 @@ export class AppDatabase {
     if (!messageColumns.has("cancelled_at")) this.db.exec("ALTER TABLE chat_messages ADD COLUMN cancelled_at TEXT");
     if (!messageColumns.has("version")) this.db.exec("ALTER TABLE chat_messages ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
     if (!messageColumns.has("edited_at")) this.db.exec("ALTER TABLE chat_messages ADD COLUMN edited_at TEXT");
+    const attachmentColumns = new Set((this.db.prepare("PRAGMA table_info(attachment_uploads)").all() as Array<{ name: string }>).map(row => row.name));
+    if (!attachmentColumns.has("meeting_message_id")) this.db.exec("ALTER TABLE attachment_uploads ADD COLUMN meeting_message_id TEXT REFERENCES meeting_messages(id) ON DELETE SET NULL");
+    const meetingMessageColumns = new Set((this.db.prepare("PRAGMA table_info(meeting_messages)").all() as Array<{ name: string }>).map(row => row.name));
+    if (!meetingMessageColumns.has("attachments_json")) this.db.exec("ALTER TABLE meeting_messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'");
+    if (!meetingMessageColumns.has("client_request_id")) this.db.exec("ALTER TABLE meeting_messages ADD COLUMN client_request_id TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_messages_request ON meeting_messages(meeting_id, client_request_id) WHERE client_request_id IS NOT NULL");
+    const creationColumns = new Set((this.db.prepare("PRAGMA table_info(orchestrator_task_creations)").all() as Array<{ name: string }>).map(row => row.name));
+    // Existing coordinated tasks historically fanned every reviewer out together. Opt-in sequencing
+    // is recorded only for newly configured workflows; migration must not reinterpret legacy JSON order.
+    if (!creationColumns.has("review_policy")) this.db.exec("ALTER TABLE orchestrator_task_creations ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'legacy_parallel'");
     const reviewerColumns = new Set((this.db.prepare("PRAGMA table_info(orchestrator_task_reviewers)").all() as Array<{ name: string }>).map(row => row.name));
     if (!reviewerColumns.has("snapshot_name")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN snapshot_name TEXT");
     if (!reviewerColumns.has("snapshot_title")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN snapshot_title TEXT");
+    if (!reviewerColumns.has("position")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN position INTEGER NOT NULL DEFAULT 0");
+    if (!reviewerColumns.has("feedback_kind")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN feedback_kind TEXT");
+    if (!reviewerColumns.has("decision_required")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN decision_required TEXT");
+    if (!reviewerColumns.has("responsible_owner")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN responsible_owner TEXT");
+    if (!reviewerColumns.has("feedback_delivery_status")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN feedback_delivery_status TEXT");
+    if (!reviewerColumns.has("feedback_delivered_at")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN feedback_delivered_at TEXT");
+    if (!reviewerColumns.has("resolution_status")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN resolution_status TEXT");
+    if (!reviewerColumns.has("resolution_text")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN resolution_text TEXT");
+    if (!reviewerColumns.has("resolution_authorization_text")) this.db.exec("ALTER TABLE orchestrator_task_reviewers ADD COLUMN resolution_authorization_text TEXT");
+    const reviewerSchema = (this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='orchestrator_task_reviewers'").get() as { sql: string }).sql;
+    if (!reviewerSchema.includes("waiting_for_user")) {
+      this.db.exec(`PRAGMA foreign_keys = OFF;
+        CREATE TABLE orchestrator_task_reviewers_next (
+          id TEXT PRIMARY KEY,
+          creation_id TEXT NOT NULL REFERENCES orchestrator_task_creations(id) ON DELETE CASCADE,
+          member_id TEXT NOT NULL REFERENCES team_members(id),
+          snapshot_name TEXT NOT NULL,
+          snapshot_title TEXT NOT NULL,
+          position INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','awaiting_review','changes_requested','waiting_for_user','observed','approved','failed')),
+          latest_feedback TEXT,
+          feedback_kind TEXT,
+          decision_required TEXT,
+          responsible_owner TEXT,
+          feedback_delivery_status TEXT,
+          feedback_delivered_at TEXT,
+          resolution_status TEXT,
+          resolution_text TEXT,
+          resolution_authorization_text TEXT,
+          review_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(creation_id, member_id)
+        );
+        INSERT INTO orchestrator_task_reviewers_next
+          (id,creation_id,member_id,snapshot_name,snapshot_title,position,status,latest_feedback,feedback_kind,
+           decision_required,responsible_owner,feedback_delivery_status,feedback_delivered_at,resolution_status,resolution_text,resolution_authorization_text,
+           review_count,created_at,updated_at)
+        SELECT id,creation_id,member_id,snapshot_name,snapshot_title,position,status,latest_feedback,feedback_kind,
+          decision_required,responsible_owner,feedback_delivery_status,feedback_delivered_at,resolution_status,resolution_text,resolution_authorization_text,
+          review_count,created_at,updated_at
+        FROM orchestrator_task_reviewers;
+        DROP TABLE orchestrator_task_reviewers;
+        ALTER TABLE orchestrator_task_reviewers_next RENAME TO orchestrator_task_reviewers;
+        CREATE INDEX idx_orchestrator_task_reviewers_status ON orchestrator_task_reviewers(status, updated_at);
+        PRAGMA foreign_keys = ON;`);
+    }
     this.db.exec(`UPDATE orchestrator_task_reviewers
       SET snapshot_name=COALESCE(NULLIF(snapshot_name,''),(SELECT name FROM team_members WHERE id=member_id),'Archived reviewer'),
           snapshot_title=COALESCE(NULLIF(snapshot_title,''),(SELECT title FROM team_members WHERE id=member_id),'Specialist reviewer')

@@ -20,6 +20,7 @@ function fixture(t: TestContext) {
   const attachments = new AttachmentService(database), agents = new AgentService(database, tasks, attachments);
   const requests: Array<{ method: string; params: any }> = [];
   const codex = Reflect.get(agents, "codex");
+  t.mock.method(agents as any, "runtimeForOwner", () => codex);
   t.mock.method(codex, "initialize", async () => {});
   t.mock.method(codex, "request", async (method: string, params: any) => {
     requests.push({ method, params });

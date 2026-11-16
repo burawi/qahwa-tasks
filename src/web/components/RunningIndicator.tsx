@@ -1,4 +1,4 @@
-import "../running-indicator.css";
+import React from "react";
 
 /** Keep the slot mounted so state changes never move adjacent text or badges. */
 export function RunningIndicator({ running, label = "Running" }: { running: boolean; label?: string }) {

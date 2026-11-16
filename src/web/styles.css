@@ -802,6 +802,7 @@ button:focus-visible, a:focus-visible { outline: 1px solid var(--accent); outlin
 .conversation-title { font-size: 14px; line-height: 1.35; font-weight: 550; letter-spacing: -.01em; }
 .conversation-preview { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .conversation-remark { align-items: flex-start; line-height: 1.4; }
+.workflow-remark { font-size: 11px; }
 .conversation-remark > i { margin-top: 5px; }
 .conversation-remark > span { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
 .is-unread .conversation-title { font-weight: 800; }
@@ -819,6 +820,10 @@ button:focus-visible, a:focus-visible { outline: 1px solid var(--accent); outlin
   .task-row.conversation-row { padding: 12px 10px; gap: 9px; }
   .task-row.conversation-row .project-logo.medium { width: 36px; height: 36px; }
   .conversation-context { gap: 5px; font-size: 9px; }
+}
+
+@media (min-width: 700px) {
+  .workflow-remark { font-size: 12px; }
 }
 
 /* QAH-0010: task selection supplies context to each orchestrator message. */
@@ -1036,6 +1041,7 @@ button.primary:hover:not(:disabled), .send-button:hover:not(:disabled), .fab:hov
 .participant-option small { color: var(--muted); }
 .mention-strip { width: min(100%, 860px); margin: 0 auto; padding: 5px 12px; display: flex; gap: 5px; overflow-x: auto; border-top: 1px solid var(--line); background: var(--surface); }
 .mention-strip button { flex: none; min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--accent-strong); font-size: 11px; }
+.meeting-page .attachment-retry { left: 4px; right: auto; }
 .speaker-title { color: var(--muted); font-size: 10px; }
 .dispatch-state { padding: 2px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; text-transform: capitalize; }
 .dispatch-state.failed { color: var(--red); }

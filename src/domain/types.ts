@@ -4,6 +4,16 @@ export type TaskOutcome = "completed" | "cancelled" | null;
 export type Actor = "user" | "codex" | "system";
 export type CommentKind = "comment" | "handoff";
 export type TaskTone = "neutral" | "blue" | "green" | "orange" | "red";
+export type TaskWorkflowState = "working" | "reviewing" | "capacity_queued" | "waiting_for_user" | "blocked" | "ready_for_review";
+export interface TaskWorkflow {
+  state: TaskWorkflowState;
+  label: string;
+  owner: string;
+  /** True only while the named specialist is actively preparing task input. */
+  ownerActive?: boolean;
+  nextAction: string;
+  blocker: string | null;
+}
 export type SessionSurface = "undecided" | "chat" | "design";
 export type SessionRunState = "not_started" | "idle" | "running" | "waiting" | "failed" | "interrupted";
 export type SessionOwnerType = "task" | "orchestrator";
@@ -64,6 +74,8 @@ export interface MeetingMessage {
   speakerName: string;
   speakerTitle: string;
   body: string;
+  attachments: ChatAttachment[];
+  clientRequestId?: string;
   status?: "pending" | "delivered" | "failed";
   createdAt: string;
 }
@@ -129,6 +141,8 @@ export interface TaskSummary {
   sessionState: SessionRunState;
   surface: SessionSurface;
   lastActivityAt: string | null;
+  /** Overall implementation/review workflow; independent of the implementation session's idle state. */
+  workflow?: TaskWorkflow;
   /** Presentation preference; never changes task priority or scheduling. */
   pinnedAt?: string | null;
   conversation?: {

@@ -37,7 +37,7 @@ export function attachmentResource(attachment: ChatAttachment): MessageResource 
   };
 }
 
-const protectedPath = /^\/api\/(?:tasks\/[^/]+\/(?:outputs\/[^/]+\/artifacts\/\d+|attachments\/[^/]+|files\/[^/]+)|orchestrator\/(?:attachments|files)\/[^/]+)$/;
+const protectedPath = /^\/api\/(?:tasks\/[^/]+\/(?:outputs\/[^/]+\/artifacts\/\d+|attachments\/[^/]+|files\/[^/]+)|orchestrator\/(?:attachments|files)\/[^/]+|meetings\/[^/]+\/attachments\/[^/]+)$/;
 
 export function taskIdFromPath(pathname: string): string | null {
   const match = /^\/tasks\/([^/]+)$/.exec(pathname);

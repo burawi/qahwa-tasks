@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertDomain } from "../domain/errors.js";
-import type { MeetingMessage, MeetingParticipant, MeetingSummary, TeamMember, TeamMemberSession } from "../domain/types.js";
+import type { ChatAttachment, MeetingMessage, MeetingParticipant, MeetingSummary, TeamMember, TeamMemberSession } from "../domain/types.js";
 import type { UserAvatar } from "../domain/user-avatar.js";
 import { MAX_USER_AVATAR_BYTES, USER_AVATAR_SIZE_ERROR } from "../domain/user-avatar.js";
 import type { AppDatabase } from "./database.js";
@@ -17,7 +17,7 @@ type MemberRow = {
 type MeetingRow = { id: string; title: string; status: "active" | "archived"; created_at: string; updated_at: string };
 type MeetingMessageRow = {
   id: string; meeting_id: string; speaker_type: MeetingMessage["speakerType"]; speaker_id: string | null;
-  speaker_name: string; speaker_title: string; body: string; created_at: string;
+  speaker_name: string; speaker_title: string; body: string; attachments_json: string; client_request_id: string | null; created_at: string;
 };
 export type OrchestratorMeetingAccess = {
   requested: boolean;
@@ -111,8 +111,11 @@ function meetingMessage(row: MeetingMessageRow, database: AppDatabase): MeetingM
   const status = row.speaker_type === "user" && dispatch.total
     ? dispatch.pending ? "pending" : dispatch.failed ? "failed" : "delivered"
     : undefined;
+  let attachments: ChatAttachment[] = [];
+  try { attachments = JSON.parse(row.attachments_json || "[]") as ChatAttachment[]; } catch { /* Preserve the message if legacy metadata is malformed. */ }
   return { id: row.id, meetingId: row.meeting_id, speakerType: row.speaker_type, speakerId: row.speaker_id,
-    speakerName: row.speaker_name, speakerTitle: row.speaker_title, body: row.body, ...(status ? { status } : {}), createdAt: row.created_at };
+    speakerName: row.speaker_name, speakerTitle: row.speaker_title, body: row.body, attachments,
+    ...(row.client_request_id ? { clientRequestId: row.client_request_id } : {}), ...(status ? { status } : {}), createdAt: row.created_at };
 }
 
 export class TeamService {
@@ -507,12 +510,21 @@ export class TeamService {
       .map(row => meetingMessage(row, this.database));
   }
 
-  addMeetingMessage(meetingId: string, speaker: Pick<MeetingMessage, "speakerType" | "speakerId" | "speakerName" | "speakerTitle">, body: string): string {
+  addMeetingMessage(meetingId: string, speaker: Pick<MeetingMessage, "speakerType" | "speakerId" | "speakerName" | "speakerTitle">,
+    body: string, attachments: ChatAttachment[] = [], clientRequestId?: string): string {
     const id = randomUUID(); const timestamp = now();
-    this.database.db.prepare(`INSERT INTO meeting_messages(id,meeting_id,speaker_type,speaker_id,speaker_name,speaker_title,body,created_at)
-      VALUES (?,?,?,?,?,?,?,?)`).run(id, meetingId, speaker.speakerType, speaker.speakerId, speaker.speakerName, speaker.speakerTitle, body, timestamp);
+    this.database.db.prepare(`INSERT INTO meeting_messages
+      (id,meeting_id,speaker_type,speaker_id,speaker_name,speaker_title,body,attachments_json,client_request_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, meetingId, speaker.speakerType, speaker.speakerId, speaker.speakerName,
+        speaker.speakerTitle, body, JSON.stringify(attachments), clientRequestId ?? null, timestamp);
     this.database.db.prepare("UPDATE meetings SET updated_at=? WHERE id=?").run(timestamp, meetingId);
     return id;
+  }
+
+  meetingMessageByRequest(meetingId: string, clientRequestId: string): MeetingMessage | null {
+    const row = this.database.db.prepare("SELECT * FROM meeting_messages WHERE meeting_id=? AND client_request_id=?")
+      .get(meetingId, clientRequestId) as MeetingMessageRow | undefined;
+    return row ? meetingMessage(row, this.database) : null;
   }
 
   participantsForMessage(meetingId: string, body: string): MeetingParticipant[] {

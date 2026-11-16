@@ -26,6 +26,7 @@ import {
   type TaskArtifact,
   type TaskStatus,
   type TaskSummary,
+  type TaskWorkflow,
   type SessionRunState,
   type SessionSurface,
   type TaskTone,
@@ -112,7 +113,7 @@ function projectFromRow(row: ProjectRow): Project {
   };
 }
 
-function taskFromRow(row: TaskRow): TaskSummary {
+function taskFromRow(row: TaskRow, workflow?: TaskWorkflow): TaskSummary {
   return {
     sessionKind: row.session_kind,
     id: row.id, humanId: row.human_id, projectId: row.project_id, projectName: row.project_name,
@@ -121,6 +122,7 @@ function taskFromRow(row: TaskRow): TaskSummary {
     rank: row.rank, unresolvedCommentCount: Number(row.unresolved_comment_count), version: row.version,
     smartMessage: row.smart_message, tone: row.tone, sessionState: row.session_state, surface: row.surface,
     lastActivityAt: row.last_activity_at,
+    ...(workflow ? { workflow } : {}),
     pinnedAt: row.pinned_at,
     ...(row.conversation_activity_at === undefined ? {} : { conversation: {
       ...(row.description_text ? { descriptionText: row.description_text } : {}),
@@ -348,7 +350,7 @@ export class TaskService {
         t.rank, t.created_at`
       : "t.rank, t.created_at";
     const rows = this.database.db.prepare(`${this.taskSelect(conversation)} WHERE ${where} ORDER BY ${order}`).all(...params) as TaskRow[];
-    return rows.map(taskFromRow);
+    return rows.map(row => taskFromRow(row, this.workflowForTask(row.id)));
   }
 
   getTask(idOrHumanId: string, includeResolved = true): TaskDetail {
@@ -358,7 +360,7 @@ export class TaskService {
     assertDomain(row, "Task not found", "task_not_found", 404);
     const comments = this.commentsForTask(row.id, includeResolved);
     return {
-      ...taskFromRow(row), rootDirectory: row.root_directory, description: parseDocument(row.description_json), comments,
+      ...taskFromRow(row, this.workflowForTask(row.id)), rootDirectory: row.root_directory, description: parseDocument(row.description_json), comments,
       idleNotificationsEnabled: Boolean(row.idle_notifications_enabled),
       canEdit: this.taskContentEditable(row),
       outputs: this.outputsForTask(row.id),
@@ -805,6 +807,101 @@ export class TaskService {
         SELECT m.id FROM chat_messages m WHERE m.owner_type = 'task' AND m.owner_id = t.id
           AND m.role IN ('user', 'assistant') AND COALESCE(json_extract(m.metadata_json, '$.queueScheduling'), 0) != 1
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1)` : ""}`;
+  }
+
+  private workflowForTask(taskId: string): TaskWorkflow | undefined {
+    const creation = this.database.db.prepare(`SELECT t.status FROM orchestrator_task_creations c
+      JOIN tasks t ON t.id=c.task_id WHERE c.task_id=?`).get(taskId) as { status: TaskStatus } | undefined;
+    if (!creation) return undefined;
+    if (creation.status === "closed") return undefined;
+    const reviews = this.database.db.prepare(`SELECT r.*,m.archived_at,
+      (SELECT s.run_state FROM team_member_sessions ms JOIN agent_sessions s
+        ON s.owner_type='orchestrator' AND s.owner_id='team-session:' || ms.id
+        WHERE ms.member_id=r.member_id AND ms.task_id=? AND ms.archived_at IS NULL
+        ORDER BY ms.created_at DESC LIMIT 1) AS reviewer_run_state,
+      EXISTS(SELECT 1 FROM team_member_sessions ms JOIN chat_messages cm
+        ON cm.owner_type='orchestrator' AND cm.owner_id='team-session:' || ms.id
+        JOIN pending_messages pm ON pm.message_id=cm.id
+        WHERE ms.member_id=r.member_id AND ms.task_id=? AND ms.archived_at IS NULL) AS reviewer_queued,
+      EXISTS(SELECT 1 FROM task_outputs fresh WHERE fresh.task_id=c.task_id
+        AND r.feedback_delivered_at IS NOT NULL AND fresh.created_at>r.feedback_delivered_at) AS fresh_evidence
+      FROM orchestrator_task_reviewers r
+      LEFT JOIN team_members m ON m.id=r.member_id
+      JOIN orchestrator_task_creations c ON c.id=r.creation_id
+      WHERE c.task_id=? ORDER BY r.position,r.created_at,r.rowid`).all(taskId, taskId, taskId) as Array<{
+        snapshot_name: string; snapshot_title: string; status: string; latest_feedback: string | null;
+        decision_required: string | null; responsible_owner: string | null; feedback_delivery_status: string | null;
+        reviewer_run_state: SessionRunState | null; reviewer_queued: number; archived_at: string | null; fresh_evidence: number;
+      }>;
+    const waiting = reviews.find(review => review.status === "waiting_for_user");
+    if (waiting) return {
+      state: "waiting_for_user", label: "Waiting for user", owner: waiting.responsible_owner || "You",
+      nextAction: waiting.decision_required || `Decide whether to authorize or reject ${waiting.snapshot_name}'s requested work`,
+      blocker: waiting.latest_feedback,
+    };
+    const failed = reviews.find(review => review.status === "failed");
+    if (failed) return {
+      state: "blocked", label: "Blocked", owner: `${failed.snapshot_name} · ${failed.snapshot_title}`,
+      nextAction: `Restore or replace the unavailable ${failed.snapshot_name} review`, blocker: failed.latest_feedback,
+    };
+    const correction = reviews.find(review => review.status === "changes_requested");
+    if (correction) {
+      const concurrent = reviews.filter(review => review.status === "awaiting_review");
+      const concurrentNames = concurrent.map(review => review.snapshot_name).join(", ");
+      const concurrentAction = concurrent.length
+        ? ` Concurrent review${concurrent.length === 1 ? "" : "s"}: ${concurrentNames} ${concurrent.length === 1 ? "continues" : "continue"} reviewing the submitted evidence.`
+        : "";
+      return correction.feedback_delivery_status === "failed"
+        ? { state: "blocked", label: "Blocked", owner: "Task session",
+          nextAction: `Inspect and retry delivery of ${correction.snapshot_name}'s preserved corrections.${concurrentAction}`,
+          blocker: correction.latest_feedback }
+        : { state: "capacity_queued", label: "Capacity queued", owner: "Task session",
+          nextAction: `Resume the authorized corrections requested by ${correction.snapshot_name}.${concurrentAction}`,
+          blocker: correction.latest_feedback };
+    }
+    const activeReview = reviews.find(review => review.status === "awaiting_review");
+    if (activeReview) {
+      const reviewer = `${activeReview.snapshot_name} · ${activeReview.snapshot_title}`;
+      const reviewing = activeReview.reviewer_run_state === "running" || activeReview.reviewer_run_state === "waiting";
+      return reviewing
+        ? { state: "reviewing", label: "Reviewing", owner: reviewer,
+          ownerActive: true,
+          nextAction: `${activeReview.snapshot_name} reviews the submitted evidence`, blocker: null }
+        : { state: "capacity_queued", label: "Capacity queued", owner: reviewer,
+          nextAction: `${activeReview.snapshot_name}'s review starts when specialist capacity is available`, blocker: null };
+    }
+    const task = this.database.db.prepare(`SELECT t.status,s.run_state,
+      EXISTS(SELECT 1 FROM pending_messages pm JOIN chat_messages cm ON cm.id=pm.message_id
+        WHERE cm.owner_type='task' AND cm.owner_id=t.id) AS task_queued
+      FROM tasks t LEFT JOIN agent_sessions s ON s.owner_type='task' AND s.owner_id=t.id WHERE t.id=?`).get(taskId) as
+      { status: TaskStatus; run_state: SessionRunState | null; task_queued: number };
+    const correctionCycle = reviews.find(review => review.status === "pending"
+      && review.feedback_delivery_status === "delivered" && !review.fresh_evidence);
+    if (correctionCycle) return task.task_queued
+      ? { state: "capacity_queued", label: "Capacity queued", owner: "Task session",
+        nextAction: `Resume ${correctionCycle.snapshot_name}'s authorized corrections when capacity and worktree access are available`, blocker: null }
+      : { state: "working", label: "Working", owner: "Task session",
+        nextAction: `Complete ${correctionCycle.snapshot_name}'s authorized corrections and submit updated evidence`, blocker: null };
+    if (task.run_state === "running" || task.run_state === "waiting" || task.status === "in_progress") return {
+      state: "working", label: "Working", owner: "Task session",
+      nextAction: task.run_state === "waiting" ? "Provide the requested task-session input" : "Complete implementation and submit validated evidence",
+      blocker: null,
+    };
+    const next = reviews.find(review => review.status === "pending");
+    if (next && task.status === "in_review") return {
+      state: "capacity_queued", label: "Capacity queued", owner: `${next.snapshot_name} · ${next.snapshot_title}`,
+      nextAction: `${next.snapshot_name}'s review starts when specialist capacity is available`, blocker: null,
+    };
+    if (task.status === "in_review" && reviews.every(review => review.status === "approved" || review.status === "observed")) return {
+      state: "ready_for_review", label: "Ready for review", owner: "You",
+      nextAction: "Review the specialist verdicts; release, commit, deployment, and closure remain explicit gates", blocker: null,
+    };
+    if (task.task_queued) return {
+      state: "capacity_queued", label: "Capacity queued", owner: "Task session",
+      nextAction: "Resume implementation when capacity and worktree access are available", blocker: null,
+    };
+    return { state: "working", label: "Working", owner: "Task session",
+      nextAction: "Continue the authorized task scope", blocker: null };
   }
 
   private logoDirectory(): string {

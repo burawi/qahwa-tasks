@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { BrandMark } from "./components/BrandMark";
 import "./styles.css";
+import "./running-indicator.css";
 
 declare global {
   interface Window {

@@ -17,7 +17,9 @@ class ControlledAgents extends AgentService {
 }
 
 export async function until(condition: () => boolean, label: string) {
-  const deadline = Date.now() + 5_000;
+  // Review recovery crosses multiple fake app-server turns and SQLite commits.
+  // Leave enough headroom for the same behavioral suite on storage-pressured hosts.
+  const deadline = Date.now() + 15_000;
   while (!condition()) {
     assert.ok(Date.now() < deadline, label);
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -78,7 +80,12 @@ setInterval(() => {
     dataDir: root, backupDir: join(root, "backups"), sessionDays: 365 });
   const tasks = new TaskService(database);
   const attachments = new AttachmentService(database, join(root, "attachments"));
-  let agents = new ControlledAgents(database, tasks, attachments);
+  const useSharedFixtureRuntime = (instance: ControlledAgents) => {
+    const runtime = Reflect.get(instance, "codex");
+    Reflect.set(instance, "runtimeForOwner", () => runtime);
+    return instance;
+  };
+  let agents = useSharedFixtureRuntime(new ControlledAgents(database, tasks, attachments));
   let nextItem = 0;
   const writeJson = (path: string, value: unknown) => {
     writeFileSync(`${path}.tmp`, JSON.stringify(value));
@@ -87,7 +94,10 @@ setInterval(() => {
   return {
     root, database, tasks,
     get agents() { return agents; },
-    restart() { agents.close(); agents = new ControlledAgents(database, tasks, attachments); },
+    async restart() {
+      await agents.close();
+      agents = useSharedFixtureRuntime(new ControlledAgents(database, tasks, attachments));
+    },
     emit(batch: unknown[]) { writeJson(events, batch); },
     task(title = "Fix the canvas preview", projectId?: string) {
       const project = projectId ? { id: projectId } : tasks.createProject({ name: "Qahwa", prefix: `R${nextItem++}`, rootDirectory: root }, "user");
@@ -95,7 +105,11 @@ setInterval(() => {
     },
     settings(value: { reject?: string; rejectCode?: number; rejectMessage?: string; delay?: number; currentTurnId?: string | null; ackTurnId?: string; disconnect?: boolean }) { writeJson(settings, value); },
     requests(): Array<{ method?: string; params: any }> {
-      return readFileSync(capture, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      return readFileSync(capture, "utf8").split("\n").flatMap((line) => {
+        if (!line.trim()) return [];
+        try { return [JSON.parse(line)]; }
+        catch { return []; } // The fake server may still be appending the final JSONL record.
+      });
     },
     workspace() { return agents.workspace("orchestrator", "main"); },
     assistants() { return agents.workspace("orchestrator", "main").messages.filter(({ role }) => role === "assistant"); },
@@ -109,8 +123,8 @@ setInterval(() => {
       await until(() => Boolean(database.db.prepare("SELECT 1 FROM session_events WHERE event_type = 'item/completed' AND payload_json LIKE ?").get(`%${itemId}%`)), "Reply event did not arrive");
       return itemId;
     },
-    close() {
-      agents.close(); attachments.close(); database.close();
+    async close() {
+      await agents.close(); attachments.close(); database.close();
       if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
       rmSync(root, { recursive: true, force: true });
     },
