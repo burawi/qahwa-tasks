@@ -4,13 +4,15 @@ import { appendAttachmentPaths, buildAttachmentTurnInput, buildTaskImplementatio
 import { readFileSync } from "node:fs";
 
 test("agent envelope extracts task presence, surface, design, and orchestrator starts", () => {
-  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true,"validation":["Typecheck passed"],"limitations":["Not deployed"],"artifacts":["artifacts/dashboard.png"]} -->`);
+  const response = parseAgentEnvelope(`Implemented the dashboard.\n\n<qahwa-design>{"format":"web","artboard":{"width":390,"height":844,"background":"#fff","name":"Dashboard"},"html":"<main data-qahwa-id='root'></main>","css":"main{min-height:100vh}"}</qahwa-design>\n<!-- qahwa-start:WAS-0012 -->\n<!-- qahwa-priority:WAS-0012, QAH-0004 -->\n<!-- qahwa:{"message":"Implemented","tone":"green","surface":"design","review":true,"reviewerId":"member-1","reviewMessage":"Re-review the corrected dashboard","validation":["Typecheck passed"],"limitations":["Not deployed"],"artifacts":["artifacts/dashboard.png"]} -->`);
   assert.equal(response.body, "Implemented the dashboard.");
   assert.equal(response.message, "Implemented");
   assert.equal(response.tone, "green");
   assert.equal(response.surface, "design");
   assert.equal(response.design?.artboard.width, 390);
   assert.equal(response.review, true);
+  assert.equal(response.reviewerId, "member-1");
+  assert.equal(response.reviewMessage, "Re-review the corrected dashboard");
   assert.deepEqual(response.reviewEvidence, {
     validation: ["Typecheck passed"], limitations: ["Not deployed"], artifacts: ["artifacts/dashboard.png"],
   });

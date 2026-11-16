@@ -389,7 +389,7 @@ export function buildTaskImplementationHandoff(task: { humanId: string; projectN
 
 export function parseAgentEnvelope(text: string): {
   body: string; message?: string; tone?: TaskTone; surface?: SessionSurface; design?: DesignDocument; review: boolean;
-  reviewEvidence?: TaskReviewEvidence;
+  reviewEvidence?: TaskReviewEvidence; reviewerId?: string; reviewMessage?: string;
   startTasks: string[]; priorityTasks: string[]; intakeReady?: boolean; intakeAccessMode?: TaskAccessMode;
   accessRequest?: { mode: TaskAccessMode; authorization: string }; contextRollover?: string; silent: boolean; actions: OrchestratorAction[];
   management?: ManagementSignal; managementReview?: ReviewSignal;
@@ -403,6 +403,8 @@ export function parseAgentEnvelope(text: string): {
   let design: DesignDocument | undefined;
   let review = false;
   let reviewEvidence: TaskReviewEvidence | undefined;
+  let reviewerId: string | undefined;
+  let reviewMessage: string | undefined;
   const startTasks: string[] = [];
   const priorityTasks: string[] = [];
   const actions: OrchestratorAction[] = [];
@@ -419,6 +421,8 @@ export function parseAgentEnvelope(text: string): {
       if (["neutral", "blue", "green", "orange", "red"].includes(String(parsed.tone))) tone = parsed.tone as TaskTone;
       if (["undecided", "chat", "design"].includes(String(parsed.surface))) surface = parsed.surface as SessionSurface;
       review = parsed.review === true;
+      if (typeof parsed.reviewerId === "string" && parsed.reviewerId.trim()) reviewerId = parsed.reviewerId.trim().slice(0, 200);
+      if (typeof parsed.reviewMessage === "string" && parsed.reviewMessage.trim()) reviewMessage = parsed.reviewMessage.trim().slice(0, 10_000);
       const evidenceList = (value: unknown, limit: number) => Array.isArray(value)
         ? value.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean)
           .slice(0, limit).map(item => item.slice(0, 2_000))
@@ -578,7 +582,8 @@ export function parseAgentEnvelope(text: string): {
   }).trim();
   for (const taskId of startTasks) actions.push({ type: "start", taskId, authorization: "" });
   if (priorityTasks.length) actions.push({ type: "priority", taskIds: priorityTasks, authorization: "" });
-  return { body, message, tone, surface, design, review, reviewEvidence, startTasks, priorityTasks, intakeReady, intakeAccessMode, accessRequest,
+  return { body, message, tone, surface, design, review, reviewEvidence, reviewerId, reviewMessage,
+    startTasks, priorityTasks, intakeReady, intakeAccessMode, accessRequest,
     contextRollover, management, managementReview, silent, actions };
 }
 
@@ -892,6 +897,10 @@ export class AgentService {
     for (const row of rows) this.threadOwners.set(row.thread_id, { ownerType: row.owner_type, ownerId: row.owner_id });
     void this.recoverRejectedEstablishedReviewConsultations().catch(error => {
       this.orchestratorObservations.push(`Could not recover a previously rejected specialist re-review: ${error instanceof Error ? error.message : String(error)}`);
+      this.scheduleOrchestratorObservation();
+    });
+    void this.recoverClaimedReviewHandoffs().catch(error => {
+      this.orchestratorObservations.push(`Could not recover a claimed specialist handoff: ${error instanceof Error ? error.message : String(error)}`);
       this.scheduleOrchestratorObservation();
     });
     this.scheduleTimer = setInterval(() => {
@@ -1240,6 +1249,51 @@ export class AgentService {
             { sourceEventId: event.id, actionIndex: index, actionType: action.type, taskId: task.id, memberId: action.memberId });
         }
       }
+    }
+  }
+
+  private establishedTaskReviewer(taskId: string, memberId: string): boolean {
+    return Boolean(this.database.db.prepare(`SELECT 1 FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_type='member'
+        AND participant_id=? AND status='delivered' LIMIT 1`).get(taskId, memberId));
+  }
+
+  private async recoverClaimedReviewHandoffs(): Promise<void> {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+    const events = this.database.db.prepare(`SELECT e.id,e.owner_id AS taskId,e.created_at AS createdAt,
+      json_extract(e.payload_json,'$.payload.item.text') AS text
+      FROM session_events e JOIN tasks t ON t.id=e.owner_id
+      JOIN agent_sessions s ON s.owner_type='task' AND s.owner_id=t.id
+      WHERE e.owner_type='task' AND e.event_type='item/completed' AND e.created_at>=?
+        AND json_extract(e.payload_json,'$.payload.item.type')='agentMessage'
+        AND t.status='in_progress' AND s.run_state NOT IN ('running','waiting')
+      ORDER BY e.id DESC LIMIT 200`).all(cutoff) as Array<{ id: number; taskId: string; createdAt: string; text: string }>;
+    const seen = new Set<string>();
+    for (const event of events) {
+      if (seen.has(event.taskId)) continue;
+      const parsed = parseAgentEnvelope(event.text);
+      const named = /^(.+?) re-review pending$/i.exec(parsed.message ?? "")?.[1]?.trim();
+      if (parsed.review || !named || !/routed directly to/i.test(parsed.body)
+        || !parsed.reviewEvidence?.validation.length || !parsed.reviewEvidence.artifacts.length) continue;
+      seen.add(event.taskId);
+      const member = this.team.listMembers().find(candidate => candidate.name.toLocaleLowerCase() === named.toLocaleLowerCase());
+      if (!member || !this.establishedTaskReviewer(event.taskId, member.id)) continue;
+      if (this.database.db.prepare(`SELECT 1 FROM team_dispatches
+        WHERE source_type='task' AND source_id=? AND participant_type='member'
+          AND participant_id=? AND created_at>=? LIMIT 1`).get(event.taskId, member.id, event.createdAt)) continue;
+      if (this.database.db.prepare(`SELECT 1 FROM session_events
+        WHERE owner_type='task' AND owner_id=? AND event_type='task.review_handoff_recovered'
+          AND json_extract(payload_json,'$.sourceEventId')=? LIMIT 1`).get(event.taskId, event.id)) continue;
+      const task = this.tasks.getTask(event.taskId);
+      this.tasks.submitForReview(task.id, {
+        sessionId: this.ensureSession("task", task.id).threadId ?? undefined,
+        summary: parsed.body.slice(0, 10_000), validation: parsed.reviewEvidence.validation,
+        limitations: parsed.reviewEvidence.limitations, artifacts: parsed.reviewEvidence.artifacts,
+      }, "codex");
+      await this.consultMember(member.id, task.id,
+        "Re-review the corrected task result and evidence. Return explicit approval or exact in-scope corrections.", null);
+      this.recordEvent({ ownerType: "task", ownerId: task.id }, "task.review_handoff_recovered",
+        { sourceEventId: event.id, memberId: member.id, memberName: member.name });
     }
   }
 
@@ -2020,7 +2074,7 @@ export class AgentService {
   }
 
   private prompt(ownerType: SessionOwnerType, ownerId: string, userText: string, initial: boolean, selectedTasks?: SelectedTaskReference[], requestPageId: string | null = null, worktreeRoot?: string): string {
-    const envelope = `${FILE_DELIVERY_INSTRUCTIONS}\n\nAt the end of every response, append exactly one hidden marker: <!-- qahwa:{"message":"short task-list status under 7 words","tone":"neutral|blue|green|orange|red","surface":"chat|design","review":false} -->. Use green for a good completed/result state, red for failure/blocker, orange for warning or clarification needed, blue for active progress, neutral for dormant context. Set review true only when implementation and proportionate validation are complete and the task is genuinely ready for user review. For a review submission, include non-empty \`validation\`, \`limitations\`, and \`artifacts\` string arrays in the same marker; artifact paths must resolve inside the task project root. Never claim completion without evidence.`;
+    const envelope = `${FILE_DELIVERY_INSTRUCTIONS}\n\nAt the end of every response, append exactly one hidden marker: <!-- qahwa:{"message":"short task-list status under 7 words","tone":"neutral|blue|green|orange|red","surface":"chat|design","review":false} -->. Use green for a good completed/result state, red for failure/blocker, orange for warning or clarification needed, blue for active progress, neutral for dormant context. Set review true only when implementation and proportionate validation are complete and the task is genuinely ready for user or specialist review. For a review submission, include non-empty \`validation\`, \`limitations\`, and \`artifacts\` string arrays in the same marker; artifact paths must resolve inside the task project root. When a correction must return specifically to the same established reviewer, also include \`reviewerId\` and a concise \`reviewMessage\`; the application verifies the prior reviewer relationship and creates the real handoff. Never claim that work was routed to a reviewer through a comment, comment reply, prose statement, or unresolved-comment change. A handoff is real only when the application creates its system trace. Never claim completion without evidence.`;
     const member = ownerType === "orchestrator" ? this.team.memberForOwner(ownerId) : null;
     if (member) {
       const handoff = this.database.setting(`team_rollover:${ownerId}`);
@@ -2158,7 +2212,7 @@ Conversation input: ${userText}`;
     const userResolutions = [...new Set([...savedUsers, ...current.userResolutions])].slice(-12);
     const orchestratorGuidance = [...new Set([...savedGuidance, ...current.orchestratorGuidance])].slice(-12);
     const reviewers = this.taskReviewerContext(taskId);
-    const reviewerBlock = reviewers.length ? `\n\nREGISTERED SPECIALIST REVIEWERS (structured Qahwa records):\n${JSON.stringify(reviewers)}\nReviewer contract: These are real Qahwa supervisory Codex member sessions, not humans to identify and not roles for the task worker to simulate. Produce concrete evidence for their independent review. Never invent or simulate their opinions, and never ask the user who they are. Route by memberId while routable; retain snapshotName and snapshotTitle for durable history after rename or archival.` : "";
+    const reviewerBlock = reviewers.length ? `\n\nREGISTERED SPECIALIST REVIEWERS (structured Qahwa records):\n${JSON.stringify(reviewers)}\nReviewer contract: These are real Qahwa supervisory Codex member sessions, not humans to identify and not roles for the task worker to simulate. Produce concrete evidence for their independent review. Never invent or simulate their opinions, and never ask the user who they are. For the normal configured sequence, set review:true with evidence and let Qahwa dispatch it. When returning a correction specifically to the same established reviewer, set review:true and include that routable memberId as reviewerId plus reviewMessage in the qahwa marker. Do not use comments, comment replies, task prose, or resolve_comment as review delivery, and do not claim routing until Qahwa adds the reviewer system trace. Retain snapshotName and snapshotTitle for durable history after rename or archival.` : "";
     return `AUTHORITATIVE TASK HANDOFF (Qahwa-managed; applies before reasoning on every turn):
 Immutable scope source: the separately labeled IMMUTABLE USER/TASK SCOPE in the task prompt. Later resolutions refine that scope but do not silently replace it.
 Resolved intake: ${handoff ? JSON.stringify({ summary: handoff.intake_summary, requestedAccessMode: handoff.requested_access_mode, recordedAt: handoff.updated_at }) : JSON.stringify({ state: session.intakeState, note: "No completed intake handoff is recorded yet." })}
@@ -2552,7 +2606,14 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
         }
       }
       const completedTask = this.tasks.getTask(owner.ownerId);
-      if (session.intakeState === "ready" && parsed.review && completedTask.status === "in_progress") {
+      const explicitReviewerRequested = Boolean(parsed.reviewerId);
+      const establishedReviewer = parsed.reviewerId && this.establishedTaskReviewer(completedTask.id, parsed.reviewerId)
+        ? this.team.getMember(parsed.reviewerId) : null;
+      if (session.intakeState === "ready" && parsed.review && explicitReviewerRequested && !establishedReviewer) {
+        this.setPresence(owner.ownerId, "Review handoff rejected", "red", "The selected specialist has not previously reviewed this task");
+        this.addMessage("task", owner.ownerId, "system",
+          "Review handoff was not created: reviewerId must identify an active specialist who previously returned review input for this task.");
+      } else if (session.intakeState === "ready" && parsed.review && completedTask.status === "in_progress") {
         this.tasks.submitForReview(completedTask.id, {
           sessionId: this.ensureSession("task", owner.ownerId).threadId ?? undefined,
           summary: body.slice(0, 10_000),
@@ -2561,11 +2622,20 @@ Treat recorded resolutions and delivered guidance as settled unless a later expl
           artifacts: parsed.reviewEvidence?.artifacts,
         }, "codex");
       }
-      if (session.intakeState === "ready" && parsed.review) {
-        void this.queueManagementReviews(completedTask.id, body)
-          .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its meeting specialist: ${error instanceof Error ? error.message : String(error)}`));
-        void this.queueDirectTaskReviews(completedTask.id, body)
-          .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its direct-request specialists: ${error instanceof Error ? error.message : String(error)}`));
+      if (session.intakeState === "ready" && parsed.review && (!explicitReviewerRequested || establishedReviewer)) {
+        if (establishedReviewer) {
+          void this.consultMember(establishedReviewer.id, completedTask.id,
+            parsed.reviewMessage ?? "Re-review the corrected task result and evidence. Return explicit approval or exact in-scope corrections.", messageId ?? null)
+            .catch(error => {
+              this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to ${establishedReviewer.name}: ${error instanceof Error ? error.message : String(error)}`);
+              this.scheduleOrchestratorObservation();
+            });
+        } else {
+          void this.queueManagementReviews(completedTask.id, body)
+            .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its meeting specialist: ${error instanceof Error ? error.message : String(error)}`));
+          void this.queueDirectTaskReviews(completedTask.id, body)
+            .catch(error => this.orchestratorObservations.push(`Could not return ${completedTask.humanId} to its direct-request specialists: ${error instanceof Error ? error.message : String(error)}`));
+        }
       }
       if (parsed.tone && ["green", "orange", "red"].includes(parsed.tone)) {
         const task = this.tasks.getTask(owner.ownerId);

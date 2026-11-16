@@ -285,6 +285,65 @@ test("startup recovery replays a previously rejected established reviewer handof
   } finally { await f.close(); }
 });
 
+test("task review marker routes a corrected result only to its established reviewer", async () => {
+  const f = coordinationFixture();
+  try {
+    const reviewer = f.agents.team.createMember({ name: "Maya", title: "Product Lead", instructions: "Review product journeys." });
+    const task = f.task("Correct the reviewed experience");
+    f.agents.workspace("task", task.id);
+    f.database.db.prepare("UPDATE agent_sessions SET intake_state='ready',run_state='idle' WHERE owner_type='task' AND owner_id=?").run(task.id);
+    f.tasks.transition(task.id, { to: "in_progress" }, "codex");
+    f.agents.limit = 0;
+    const oldTrace = (f.agents as any).addMessage("task", task.id, "system", "Maya reviewed the first result");
+    const oldDispatch = f.agents.team.createDispatch(oldTrace, "task", task.id, f.agents.team.participant(reviewer));
+    const oldResponse = (f.agents as any).addMessage("task", task.id, "assistant", "Correct the navigation.");
+    f.agents.team.completeDispatch(oldDispatch, oldResponse);
+    writeFileSync(join(f.root, "review-proof.png"), Buffer.from("corrected evidence"));
+
+    (f.agents as any).finishAgentMessage({ ownerType: "task", ownerId: task.id }, "corrected-result",
+      `Correction complete.\n<!-- qahwa:{"message":"Maya re-review pending","tone":"blue","surface":"chat","review":true,"reviewerId":"${reviewer.id}","reviewMessage":"Re-review the corrected navigation","validation":["Navigation passed"],"limitations":["Not deployed"],"artifacts":["review-proof.png"]} -->`, "corrected-turn");
+    await until(() => (f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, reviewer.id) as { count: number }).count === 2,
+    "Corrected result was not routed to the established reviewer");
+    assert.equal(f.tasks.getTask(task.id).status, "in_review");
+    assert.ok(f.agents.workspace("task", task.id).messages.some(message => message.body.includes("asked Maya")));
+  } finally { await f.close(); }
+});
+
+test("startup recovers a legacy prose-only claim that evidence was routed to an established reviewer", async () => {
+  const f = coordinationFixture();
+  try {
+    const reviewer = f.agents.team.createMember({ name: "Maya", title: "Product Lead", instructions: "Review product journeys." });
+    const task = f.task("Recover a false review claim");
+    f.agents.workspace("task", task.id);
+    f.database.db.prepare("UPDATE agent_sessions SET intake_state='ready',run_state='idle' WHERE owner_type='task' AND owner_id=?").run(task.id);
+    f.tasks.transition(task.id, { to: "in_progress" }, "codex");
+    f.agents.limit = 0;
+    const oldTrace = (f.agents as any).addMessage("task", task.id, "system", "Maya reviewed the first result");
+    const oldDispatch = f.agents.team.createDispatch(oldTrace, "task", task.id, f.agents.team.participant(reviewer));
+    const oldResponse = (f.agents as any).addMessage("task", task.id, "assistant", "Correct the navigation.");
+    f.agents.team.completeDispatch(oldDispatch, oldResponse);
+    writeFileSync(join(f.root, "legacy-proof.png"), Buffer.from("corrected evidence"));
+    const text = `The corrected packet has been routed directly to Maya for explicit re-review.\n<!-- qahwa:{"message":"Maya re-review pending","tone":"blue","surface":"chat","review":false,"validation":["Navigation passed"],"limitations":["Not deployed"],"artifacts":["legacy-proof.png"]} -->`;
+    const eventId = Number(f.database.db.prepare(`INSERT INTO session_events
+      (owner_type,owner_id,event_type,payload_json,created_at) VALUES ('task',?,'item/completed',?,?)`)
+      .run(task.id, JSON.stringify({ payload: { item: { type: "agentMessage", text } } }), new Date().toISOString()).lastInsertRowid);
+    f.database.db.prepare(`INSERT INTO session_events
+      (owner_type,owner_id,event_type,payload_json,created_at) VALUES ('task',?,'item/completed',?,?)`)
+      .run(task.id, JSON.stringify({ payload: { item: { type: "agentMessage", text: "A later authorization-only turn." } } }),
+        new Date(Date.now() + 1).toISOString());
+
+    await (f.agents as any).recoverClaimedReviewHandoffs();
+    await (f.agents as any).recoverClaimedReviewHandoffs();
+    assert.equal(f.tasks.getTask(task.id).status, "in_review");
+    assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, reviewer.id) as { count: number }).count, 2);
+    assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM session_events
+      WHERE owner_type='task' AND owner_id=? AND event_type='task.review_handoff_recovered'
+        AND json_extract(payload_json,'$.sourceEventId')=?`).get(task.id, eventId) as { count: number }).count, 1);
+  } finally { await f.close(); }
+});
+
 test("meeting replies use hidden meeting-only context and are copied into the durable transcript", async () => {
   const f = coordinationFixture();
   try {
