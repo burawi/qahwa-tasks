@@ -251,6 +251,40 @@ test("automated supervision can return an in-review legacy task only to its esta
   } finally { await f.close(); }
 });
 
+test("startup recovery replays a previously rejected established reviewer handoff once", async () => {
+  const f = coordinationFixture();
+  try {
+    const quote = "Keep authorized work moving through its review loop";
+    f.database.setSetting("orchestrator_standing_directive", JSON.stringify({
+      id: "review-loop", instruction: "Supervise authorized tasks through review",
+      sourceQuote: quote, createdAt: new Date().toISOString(),
+    }));
+    const reviewer = f.agents.team.createMember({ name: "Maya", title: "Product Lead", instructions: "Review product journeys." });
+    const task = f.task("Recover legacy product review");
+    f.tasks.transition(task.id, { to: "in_progress" }, "codex");
+    f.tasks.transition(task.id, { to: "in_review" }, "codex");
+    f.agents.limit = 0;
+    const oldTrace = (f.agents as any).addMessage("task", task.id, "system", "Maya reviewed the first result");
+    const oldDispatch = f.agents.team.createDispatch(oldTrace, "task", task.id, f.agents.team.participant(reviewer));
+    const oldResponse = (f.agents as any).addMessage("task", task.id, "assistant", "One correction is required.");
+    f.agents.team.completeDispatch(oldDispatch, oldResponse);
+    const text = `Retry the established review.\n<!-- qahwa-actions:${JSON.stringify([{
+      type: "consult", memberId: reviewer.id, taskId: task.humanId,
+      message: "Re-review the corrected evidence", authorization: quote,
+    }])} -->`;
+    const eventId = Number(f.database.db.prepare(`INSERT INTO session_events
+      (owner_type,owner_id,event_type,payload_json,created_at) VALUES ('orchestrator','main','item/completed',?,?)`)
+      .run(JSON.stringify({ payload: { item: { type: "agentMessage", text } } }), new Date().toISOString()).lastInsertRowid);
+
+    await (f.agents as any).recoverRejectedEstablishedReviewConsultations();
+    await (f.agents as any).recoverRejectedEstablishedReviewConsultations();
+    assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM team_dispatches
+      WHERE source_type='task' AND source_id=? AND participant_id=?`).get(task.id, reviewer.id) as { count: number }).count, 2);
+    assert.equal((f.database.db.prepare(`SELECT count(*) AS count FROM session_events
+      WHERE event_type='orchestrator.action_recovered' AND json_extract(payload_json,'$.sourceEventId')=?`).get(eventId) as { count: number }).count, 1);
+  } finally { await f.close(); }
+});
+
 test("meeting replies use hidden meeting-only context and are copied into the durable transcript", async () => {
   const f = coordinationFixture();
   try {

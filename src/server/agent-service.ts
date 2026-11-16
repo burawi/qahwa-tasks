@@ -890,6 +890,10 @@ export class AgentService {
     const rows = this.database.db.prepare("SELECT thread_id, owner_type, owner_id FROM agent_sessions WHERE thread_id IS NOT NULL")
       .all() as Array<{ thread_id: string; owner_type: SessionOwnerType; owner_id: string }>;
     for (const row of rows) this.threadOwners.set(row.thread_id, { ownerType: row.owner_type, ownerId: row.owner_id });
+    void this.recoverRejectedEstablishedReviewConsultations().catch(error => {
+      this.orchestratorObservations.push(`Could not recover a previously rejected specialist re-review: ${error instanceof Error ? error.message : String(error)}`);
+      this.scheduleOrchestratorObservation();
+    });
     this.scheduleTimer = setInterval(() => {
       if (this.database.db.prepare("SELECT 1 FROM task_schedules WHERE state='pending' UNION ALL SELECT 1 FROM message_schedules WHERE state='pending' LIMIT 1").get()) {
         void this.resumeQueues().catch(() => undefined);
@@ -1196,6 +1200,47 @@ export class AgentService {
             AND json_extract(e.payload_json,'$.dispatchId')=d.id)
       ORDER BY d.updated_at`).all(cutoff) as Array<{ id: string; taskId: string; participantName: string }>;
     for (const row of rows) this.noteReturnedConsultation(row.id, row.taskId, row.participantName);
+  }
+
+  private async recoverRejectedEstablishedReviewConsultations(): Promise<void> {
+    const directive = this.orchestratorDirective();
+    if (!directive) return;
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+    const events = this.database.db.prepare(`SELECT id,created_at AS createdAt,
+      json_extract(payload_json,'$.payload.item.text') AS text
+      FROM session_events
+      WHERE owner_type='orchestrator' AND owner_id='main' AND event_type='item/completed'
+        AND created_at>=? AND json_extract(payload_json,'$.payload.item.type')='agentMessage'
+        AND json_extract(payload_json,'$.payload.item.text') LIKE '%qahwa-actions%'
+      ORDER BY id DESC LIMIT 200`).all(cutoff) as Array<{ id: number; createdAt: string; text: string }>;
+    const seen = new Set<string>();
+    for (const event of events) {
+      const actions = parseAgentEnvelope(event.text).actions;
+      for (const [index, action] of actions.entries()) {
+        if (action.type !== "consult") continue;
+        const task = this.tasks.getTask(action.taskId);
+        const key = `${task.id}:${action.memberId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (task.status !== "in_review" || !hasCurrentUserAuthorization(directive.sourceQuote, action.authorization)) continue;
+        if (!this.database.db.prepare(`SELECT 1 FROM team_dispatches
+          WHERE source_type='task' AND source_id=? AND participant_type='member'
+            AND participant_id=? AND status='delivered' AND created_at<? LIMIT 1`)
+          .get(task.id, action.memberId, event.createdAt)) continue;
+        if (this.database.db.prepare(`SELECT 1 FROM team_dispatches
+          WHERE source_type='task' AND source_id=? AND participant_type='member'
+            AND participant_id=? AND created_at>=? LIMIT 1`).get(task.id, action.memberId, event.createdAt)) continue;
+        if (this.database.db.prepare(`SELECT 1 FROM session_events
+          WHERE owner_type='orchestrator' AND owner_id='main' AND event_type='orchestrator.action_recovered'
+            AND json_extract(payload_json,'$.sourceEventId')=? AND json_extract(payload_json,'$.actionIndex')=? LIMIT 1`)
+          .get(event.id, index)) continue;
+        const outcome = (await this.applyOrchestratorActions([action], undefined, null, `recovered:${event.id}:${index}`, null))[0];
+        if (outcome?.status === "queued" || outcome?.status === "applied") {
+          this.recordEvent({ ownerType: "orchestrator", ownerId: "main" }, "orchestrator.action_recovered",
+            { sourceEventId: event.id, actionIndex: index, actionType: action.type, taskId: task.id, memberId: action.memberId });
+        }
+      }
+    }
   }
 
   capacity(): CapacitySnapshot {
