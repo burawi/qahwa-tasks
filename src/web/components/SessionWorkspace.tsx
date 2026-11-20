@@ -738,7 +738,7 @@ function WorkLog({ activities, running, waiting }: { activities: WorkActivity[];
   const [expanded, setExpanded] = useState(running);
   useEffect(() => { if (running) setExpanded(true); }, [running]);
   const hasError = activities.some((item) => item.status === "error");
-  const heading = waiting ? "Waiting for you" : running ? "Codex is working" : hasError ? "Work finished with issues" : "Work completed";
+  const heading = waiting ? "Waiting for you" : running ? "Working" : hasError ? "Work finished with issues" : "Work completed";
   return <section className={`work-log ${running ? "active" : hasError ? "error" : "complete"}`} aria-live="polite">
     <button className="work-log-summary" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
       <span className="work-log-orb">{running && !waiting ? <LoaderCircle className="spin" /> : hasError ? <AlertCircle /> : <CircleCheck />}</span>
@@ -788,10 +788,10 @@ function PendingCard({ pending, disabled, onResolve }: { pending: TaskWorkspace[
       if (disabled) return;
       const data = new FormData(event.currentTarget);
       onResolve({ answers: Object.fromEntries([...data.entries()].map(([key, value]) => [key, String(value)])) });
-    }}><strong>Codex needs clarification</strong>{questions.map((question, index) => {
+    }}><strong>Needs clarification</strong>{questions.map((question, index) => {
       const options = Array.isArray(question.options) ? question.options as Array<Record<string, unknown>> : [];
       return <label key={String(question.id ?? index)}>{String(question.question ?? question.header ?? "Answer")}{options.length ? <select name={String(question.id ?? index)} required defaultValue=""><option value="" disabled>Choose…</option>{options.map((option) => <option key={String(option.label)} value={String(option.label)}>{String(option.label)}</option>)}</select> : <input name={String(question.id ?? index)} required />}</label>;
     })}<button className="primary" type="submit" disabled={disabled}>Send answers</button></form>;
   }
-  return <div className="pending-card"><strong>Approval requested</strong><p>{String(pending.payload.reason ?? pending.payload.command ?? pending.payload.method ?? "Codex requested permission to continue.")}</p><div className="button-row"><button className="secondary" type="button" disabled={disabled} onClick={() => onResolve({ approved: false })}>Deny</button><button className="primary" type="button" disabled={disabled} onClick={() => onResolve({ approved: true })}>Approve once</button></div></div>;
+  return <div className="pending-card"><strong>Approval requested</strong><p>{String(pending.payload.reason ?? pending.payload.command ?? pending.payload.method ?? "Permission requested to continue.")}</p><div className="button-row"><button className="secondary" type="button" disabled={disabled} onClick={() => onResolve({ approved: false })}>Deny</button><button className="primary" type="button" disabled={disabled} onClick={() => onResolve({ approved: true })}>Approve once</button></div></div>;
 }
