@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 
 /** Mount for one action and unmount on dismissal. Rejections keep the dialog open for retry. */
 export function ActionDialog({ title, description, confirmLabel, pendingLabel = "Working…", destructive = false,
-  disabled = false, passphrase = false, onConfirm, onClose }: {
+  disabled = false, passphrase = false, runtimeChoice, onConfirm, onClose }: {
   title: string;
   description: string;
   confirmLabel: string;
@@ -11,6 +11,7 @@ export function ActionDialog({ title, description, confirmLabel, pendingLabel = 
   destructive?: boolean;
   disabled?: boolean;
   passphrase?: boolean;
+  runtimeChoice?: { value: "codex" | "opencode"; onChange: (value: "codex" | "opencode") => void };
   onConfirm: (value: string) => void | Promise<void>;
   onClose: () => void;
 }) {
@@ -67,6 +68,10 @@ export function ActionDialog({ title, description, confirmLabel, pendingLabel = 
     <form className="action-dialog-form" noValidate onSubmit={submit} aria-busy={busy}>
       <div className="form-heading"><h2 id={`${id}-title`}>{title}</h2><button type="button" className="icon-button" aria-label="Close dialog" disabled={busy} onClick={close}><X /></button></div>
       <p id={`${id}-description`} className="action-dialog-description">{description}</p>
+      {runtimeChoice && <fieldset className="runtime-choice" data-qahwa-id="clean-runtime-choice"><legend>Runtime for the fresh session</legend>
+        <label><input type="radio" name={`${id}-runtime`} checked={runtimeChoice.value === "codex"} disabled={busy} onChange={() => runtimeChoice.onChange("codex")} /> Codex</label>
+        <label><input type="radio" name={`${id}-runtime`} checked={runtimeChoice.value === "opencode"} disabled={busy} onChange={() => runtimeChoice.onChange("opencode")} /> OpenCode</label>
+      </fieldset>}
       {passphrase && <label htmlFor={`${id}-passphrase`}>Export passphrase<input ref={input} id={`${id}-passphrase`} type="password" autoComplete="new-password" minLength={12}
         readOnly={busy} value={value} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : `${id}-description`}
         onChange={event => { setValue(event.target.value); setError(""); }} /></label>}

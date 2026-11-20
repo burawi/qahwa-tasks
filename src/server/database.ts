@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   id TEXT PRIMARY KEY,
   owner_type TEXT NOT NULL CHECK(owner_type IN ('task','orchestrator')),
   owner_id TEXT NOT NULL,
+  runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK(runtime_kind IN ('codex','opencode')),
   thread_id TEXT,
   active_turn_id TEXT,
   starting_message_id TEXT,
@@ -501,6 +502,7 @@ export class AppDatabase {
     if (!taskColumns.has("pinned_at")) this.db.exec("ALTER TABLE tasks ADD COLUMN pinned_at TEXT");
     if (!taskColumns.has("idle_notifications_enabled")) this.db.exec("ALTER TABLE tasks ADD COLUMN idle_notifications_enabled INTEGER NOT NULL DEFAULT 0 CHECK(idle_notifications_enabled IN (0,1))");
     if (!taskColumns.has("title_source")) this.db.exec("ALTER TABLE tasks ADD COLUMN title_source TEXT NOT NULL DEFAULT 'unknown'");
+    if (!taskColumns.has("agent_runtime")) this.db.exec("ALTER TABLE tasks ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'codex' CHECK(agent_runtime IN ('codex','opencode'))");
     const titleJobColumns = new Set((this.db.prepare("PRAGMA table_info(task_title_jobs)").all() as Array<{ name: string }>).map((row) => row.name));
     // Older releases did not distinguish capture jobs from automatic backfill.
     // Keep their jobs unclassified and unclaimed until explicitly opted in.
@@ -513,6 +515,7 @@ export class AppDatabase {
     const sessionColumns = new Set((this.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>).map((row) => row.name));
     if (!sessionColumns.has("device_id")) this.db.exec("ALTER TABLE sessions ADD COLUMN device_id TEXT REFERENCES paired_devices(id) ON DELETE CASCADE");
     const agentColumns = new Set((this.db.prepare("PRAGMA table_info(agent_sessions)").all() as Array<{ name: string }>).map((row) => row.name));
+    if (!agentColumns.has("runtime_kind")) this.db.exec("ALTER TABLE agent_sessions ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK(runtime_kind IN ('codex','opencode'))");
     if (!agentColumns.has("intake_state")) this.db.exec("ALTER TABLE agent_sessions ADD COLUMN intake_state TEXT NOT NULL DEFAULT 'pending'");
     // Legacy implementation sessions remain exclusive until explicitly classified.
     if (!agentColumns.has("access_mode")) this.db.exec("ALTER TABLE agent_sessions ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'worktree-write' CHECK(access_mode IN ('read-only','worktree-write'))");

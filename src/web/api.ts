@@ -1,5 +1,5 @@
 import type { ChatModelOption, ChatModelSelection } from "../domain/chat-model";
-import type { ChatAttachment, ChatReadState, Project, RichTextDocument, TaskDetail, TaskStatus, TaskSummary, TaskWorkspace, TerminalView, WorkspaceCursor, WorkspacePoll } from "../domain/types";
+import type { AgentRuntime, ChatAttachment, ChatReadState, Project, RichTextDocument, TaskDetail, TaskStatus, TaskSummary, TaskWorkspace, TerminalView, WorkspaceCursor, WorkspacePoll } from "../domain/types";
 import nacl from "tweetnacl";
 import type { OrchestratorSettings } from "../domain/orchestrator-settings";
 import type { UserAvatar } from "../domain/user-avatar";
@@ -482,7 +482,7 @@ export const api = {
   setIdleNotifications: (id: string, enabled: boolean) => request<{ task: TaskDetail }>(`/api/tasks/${encodeURIComponent(id)}/idle-notifications`, {
     method: "PUT", body: JSON.stringify({ enabled }),
   }),
-  createTask: (body: { projectId: string; title?: string; description: RichTextDocument; status: "backlog" | "todo"; draftId?: string; attachmentIds?: string[] }) =>
+  createTask: (body: { projectId: string; title?: string; description: RichTextDocument; status: "backlog" | "todo"; draftId?: string; attachmentIds?: string[]; agentRuntime?: AgentRuntime }) =>
     request<{ task: TaskDetail }>("/api/tasks", { method: "POST", body: JSON.stringify(body) }),
   restoreTask: (id: string, expectedVersion: number) => request<{ task: TaskDetail }>(
     `/api/tasks/${encodeURIComponent(id)}/restore`, { method: "POST", body: JSON.stringify({ expectedVersion }) },
@@ -532,7 +532,7 @@ export const api = {
     method: "POST", body: JSON.stringify({ message, attachmentIds, selectedTaskIds, selectedExcerpt }),
   }),
   interruptOrchestrator: () => request<{ workspace: TaskWorkspace }>("/api/orchestrator/interrupt", { method: "POST" }),
-  cleanOrchestrator: () => request<{ workspace: TaskWorkspace }>("/api/orchestrator/clean", { method: "POST" }),
+  cleanOrchestrator: (runtime: AgentRuntime = "codex") => request<{ workspace: TaskWorkspace }>("/api/orchestrator/clean", { method: "POST", body: JSON.stringify({ runtime }) }),
   respondToRequest: (requestId: string, body: { approved?: boolean; answers?: Record<string, string> }) => request<{ resolved: boolean }>(
     `/api/session-requests/${encodeURIComponent(requestId)}/respond`, { method: "POST", body: JSON.stringify(body) },
   ),

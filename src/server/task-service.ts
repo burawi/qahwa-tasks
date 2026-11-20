@@ -29,6 +29,7 @@ import {
   type SessionRunState,
   type SessionSurface,
   type TaskTone,
+  type AgentRuntime,
 } from "../domain/types.js";
 import type { AppDatabase } from "./database.js";
 import { ReviewedCommitService, type StoredCommitProposal } from "./reviewed-commit.js";
@@ -44,6 +45,7 @@ interface ProjectRow {
 
 interface TaskRow {
   session_kind: "codex" | "terminal";
+  agent_runtime: AgentRuntime;
   pinned_at: string | null;
   idle_notifications_enabled: number;
   id: string; human_id: string; project_id: string; project_name: string; project_prefix: string;
@@ -79,6 +81,7 @@ export interface CreateTaskInput {
   description?: RichTextDocument;
   sections?: { goal?: string; details?: string | string[]; doneWhen?: string[] };
   status?: "backlog" | "todo";
+  agentRuntime?: AgentRuntime;
 }
 
 const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -115,6 +118,7 @@ function projectFromRow(row: ProjectRow): Project {
 function taskFromRow(row: TaskRow): TaskSummary {
   return {
     sessionKind: row.session_kind,
+    agentRuntime: row.agent_runtime,
     id: row.id, humanId: row.human_id, projectId: row.project_id, projectName: row.project_name,
     projectPrefix: row.project_prefix, title: row.title, status: row.status, outcome: row.outcome,
     projectLogo: logoFromValues(row.project_id, row.project_logo_mime_type, row.project_logo_size, row.project_logo_updated_at),
@@ -297,6 +301,8 @@ export class TaskService {
     assertDomain(title.length >= 1 && title.length <= 200, "Title must be 1–200 characters", "invalid_title");
     const titleSource = input.title === undefined ? "fallback" : "manual";
     const status = input.status ?? "backlog";
+    const agentRuntime = input.agentRuntime ?? "codex";
+    assertDomain(agentRuntime === "codex" || agentRuntime === "opencode", "Choose Codex or OpenCode", "invalid_agent_runtime");
     const create = this.database.db.transaction(() => {
       const project = this.database.db.prepare("SELECT * FROM projects WHERE id = ? AND archived_at IS NULL").get(input.projectId) as
         | (ProjectRow & { next_task_number: number })
@@ -307,9 +313,9 @@ export class TaskService {
       const rank = this.nextRank(status);
       const timestamp = now();
       this.database.db.prepare(`
-        INSERT INTO tasks (id, human_id, project_id, title, description_json, description_text, status, rank, created_at, updated_at, title_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, humanId, input.projectId, title, JSON.stringify(description), plainTextFromDocument(description), status, rank, timestamp, timestamp, titleSource);
+        INSERT INTO tasks (id, human_id, project_id, title, description_json, description_text, status, rank, created_at, updated_at, title_source, agent_runtime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, humanId, input.projectId, title, JSON.stringify(description), plainTextFromDocument(description), status, rank, timestamp, timestamp, titleSource, agentRuntime);
       if (titleSource === "fallback") {
         this.database.db.prepare(`INSERT INTO task_title_jobs
           (task_id, origin, source_version, source_title, description_json, created_at, updated_at) VALUES (?, 'new_task', 1, ?, ?, ?, ?)`)

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,6 +16,8 @@ function fixture() {
   const capture = join(root, "requests.jsonl");
   const response = join(root, "response.txt");
   writeFileSync(response, "Ready.");
+  mkdirSync(join(root, "opencode-profile"));
+  writeFileSync(join(root, "opencode-profile", "clone-manifest.json"), "{}");
   writeFileSync(join(root, "codex"), `#!${process.execPath}
 const fs = require("node:fs");
 const readline = require("node:readline");
@@ -49,6 +51,14 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     result = { turnId: request.params.expectedTurnId };
   }
   send({ id: request.id, result });
+});
+`, { mode: 0o700 });
+  writeFileSync(join(root, "opencode"), `#!${process.execPath}
+let prompt = "";
+process.stdin.on("data", chunk => prompt += chunk);
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ type: "step_start", sessionID: "ses-opencode" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "text", sessionID: "ses-opencode", messageID: "msg-opencode", part: { text: "OpenCode ready. <!-- qahwa:{\\"message\\":\\"OpenCode ready\\",\\"tone\\":\\"blue\\",\\"surface\\":\\"chat\\",\\"review\\":false} -->" } }) + "\\n");
 });
 `, { mode: 0o700 });
   const previousPath = process.env.PATH;
@@ -107,6 +117,25 @@ test("new and resumed orchestrators retain full execution, configured integratio
     assert.equal(turn.params.model, "gpt-6-astra");
     assert.match(turn.params.input[0].text, new RegExp(project.id));
     assert.match(turn.params.input[0].text, /Create an investigation task/);
+  } finally { f.close(); }
+});
+
+test("task runtime is pinned and the orchestrator changes runtime only at clean context", async () => {
+  const f = fixture();
+  try {
+    const project = f.tasks.createProject({ name: "Runtime", prefix: "RUN", rootDirectory: f.root }, "user");
+    const task = f.tasks.createTask({ projectId: project.id, title: "OpenCode session", agentRuntime: "opencode" }, "user");
+    assert.equal(f.agents.workspace("task", task.id).session.runtime, "opencode");
+    await f.agents.send("task", task.id, "Inspect this project");
+    const taskWorkspace = await f.settled("task", task.id);
+    assert.equal(taskWorkspace.session.threadId, "ses-opencode");
+    assert.equal(taskWorkspace.session.runState, "idle");
+    assert.equal(taskWorkspace.messages.at(-1)?.body, "OpenCode ready.");
+    assert.equal(f.agents.workspace("orchestrator", "main").session.runtime, "codex");
+    const cleaned = await f.agents.cleanOrchestrator("opencode");
+    assert.equal(cleaned.session.runtime, "opencode");
+    assert.equal(cleaned.session.threadId, null);
+    assert.equal(cleaned.session.generation, 2);
   } finally { f.close(); }
 });
 

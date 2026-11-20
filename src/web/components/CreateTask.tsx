@@ -1,7 +1,7 @@
 import { AttachmentMenu } from "./AttachmentMenu";
 import { ArrowRight, File as FileIcon, Lightbulb, RotateCw, Terminal, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
-import { documentFromPlainText, type ChatAttachment, type Project, type RichTextDocument } from "../../domain/types";
+import { documentFromPlainText, type AgentRuntime, type ChatAttachment, type Project, type RichTextDocument } from "../../domain/types";
 import { api, ApiError } from "../api";
 import { ProjectLogo } from "./ProjectLogo";
 
@@ -21,6 +21,7 @@ export interface CreateTaskValue {
   status: "backlog" | "todo";
   draftId: string;
   attachmentIds: string[];
+  agentRuntime: AgentRuntime;
 }
 
 export function CreateTask({ projects, connected = true, initialProjectId, onCancel, onProjectChange, onSave, onTerminal }: {
@@ -35,6 +36,7 @@ export function CreateTask({ projects, connected = true, initialProjectId, onCan
   const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? "");
   const selectedProject = projects.find(project => project.id === projectId);
   const [note, setNote] = useState("");
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntime>("codex");
   const [draftId] = useState(() => crypto.randomUUID());
   const [files, setFiles] = useState<DraftFile[]>([]);
   const filesRef = useRef<DraftFile[]>([]);
@@ -198,7 +200,7 @@ export function CreateTask({ projects, connected = true, initialProjectId, onCan
     setError(null);
     saveUnconfirmed.current = true;
     try {
-      await onSave({ projectId, description: documentFromPlainText(note.trim()), status: "backlog", draftId,
+      await onSave({ projectId, description: documentFromPlainText(note.trim()), status: "backlog", draftId, agentRuntime,
         attachmentIds: filesRef.current.map(item => item.attachment!.id) });
       saved.current = true;
       saveUnconfirmed.current = false;
@@ -226,6 +228,11 @@ export function CreateTask({ projects, connected = true, initialProjectId, onCan
         <select id="create-task-project" data-qahwa-id="creation-project" required disabled={frozen || terminalUnconfirmed.current} value={projectId} onChange={event => { setProjectId(event.target.value); onProjectChange(event.target.value); }}>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
       </div>
     </div>
+    <fieldset className="task-create-field runtime-choice" data-qahwa-id="creation-runtime-field" disabled={frozen}>
+      <legend data-qahwa-id="creation-runtime-label">Agent runtime</legend>
+      <label data-qahwa-id="creation-runtime-codex"><input type="radio" name="agent-runtime" value="codex" checked={agentRuntime === "codex"} onChange={() => setAgentRuntime("codex")} /> Codex</label>
+      <label data-qahwa-id="creation-runtime-opencode"><input type="radio" name="agent-runtime" value="opencode" checked={agentRuntime === "opencode"} onChange={() => setAgentRuntime("opencode")} /> OpenCode</label>
+    </fieldset>
     <div className="task-create-field" data-qahwa-id="creation-note-field">
       <label htmlFor="create-task-note" data-qahwa-id="creation-note-label">Task note</label>
       <div className="task-create-note-editor" data-qahwa-id="creation-note-editor">

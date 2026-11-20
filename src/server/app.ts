@@ -524,7 +524,9 @@ function registerAgentRoutes(app: FastifyInstance, context: AppContext): void {
     const workspace = await context.agents.runPendingMessageNow("orchestrator", "main", request.params.messageId);
     return reply.code(202).send({ workspace });
   });
-  app.post("/api/orchestrator/clean", async () => ({ workspace: await context.agents.cleanOrchestrator() }));
+  app.post<{ Body: { runtime?: "codex" | "opencode" } }>("/api/orchestrator/clean", async (request) => ({
+    workspace: await context.agents.cleanOrchestrator(request.body?.runtime ?? "codex"),
+  }));
   app.get("/api/voice-transcriptions/availability", async () => ({ available: await context.voice.available() }));
   for (const mode of ["task", "orchestrator"] as const) {
     const base = mode === "task" ? "/api/tasks/:id" : "/api/orchestrator";

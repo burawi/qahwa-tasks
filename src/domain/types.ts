@@ -9,6 +9,7 @@ export type SessionRunState = "not_started" | "idle" | "running" | "waiting" | "
 export type SessionOwnerType = "task" | "orchestrator";
 export type TaskIntakeState = "pending" | "ready";
 export type TaskAccessMode = "read-only" | "worktree-write";
+export type AgentRuntime = "codex" | "opencode";
 
 export interface ChatAttachment {
   id: string;
@@ -54,6 +55,8 @@ export interface ProjectLogo {
 export interface TaskSummary {
   /** Missing on older clients/fixtures means Codex. */
   sessionKind?: "codex" | "terminal";
+  /** Runtime is fixed when the conversation is created. Older tasks are Codex. */
+  agentRuntime?: AgentRuntime;
   id: string;
   humanId: string;
   projectId: string;
@@ -136,6 +139,7 @@ export interface AgentSession {
   id: string;
   ownerType: SessionOwnerType;
   ownerId: string;
+  runtime: AgentRuntime;
   threadId: string | null;
   activeTurnId: string | null;
   surface: SessionSurface;

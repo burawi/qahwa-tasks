@@ -4,7 +4,7 @@
 
 <h1 align="center">Qahwa Tasks</h1>
 
-<p align="center">Self-hosted task management and persistent Codex workspaces.</p>
+<p align="center">Self-hosted task management and persistent Codex or OpenCode workspaces.</p>
 
 <p align="center">
   <img src=".github/assets/badge-node.svg" alt="Requires Node.js 22 or later">
@@ -15,7 +15,7 @@
 
 Qahwa Tasks is a web application for managing development tasks and their agent sessions on your own host. Each task has a persistent conversation, project context, and an explicit file-access mode. A separate orchestrator session coordinates work across projects.
 
-The server runs alongside your repositories and Codex CLI. You connect through a paired browser or installed PWA.
+The server runs alongside your repositories and local Codex/OpenCode CLIs. You connect through a paired browser or installed PWA.
 
 [Installation](#installation) · [Configuration](#configuration) · [Architecture](#architecture) · [Development](#development) · [Contributing](.github/CONTRIBUTING.md)
 
@@ -37,7 +37,7 @@ Screenshots show the application with synthetic fixture data, not production con
 ## Features
 
 - **Project tasks:** task lists, search, conversation previews, and review states.
-- **Persistent sessions:** task-specific Codex threads and a cross-project orchestrator.
+- **Persistent sessions:** task-specific Codex or OpenCode conversations and a runtime-selectable orchestrator.
 - **Workspace surfaces:** chat, HTML/CSS design canvases, and terminal sessions.
 - **Messages and scheduling:** attachments, voice messages, task schedules, and follow-up messages.
 - **Device access:** one-time pairing, device revocation, and per-task idle notifications.
@@ -49,6 +49,7 @@ Screenshots show the application with synthetic fixture data, not production con
 
 - Node.js **22 or later** and npm.
 - A configured Codex CLI on the server, available as `codex`. Qahwa launches `codex app-server` for agent sessions.
+- A configured OpenCode CLI, available as `opencode`, when OpenCode sessions are used.
 - A native build toolchain if prebuilt binaries for `better-sqlite3` or `node-pty` are unavailable on your platform.
 
 The supplied deployment configuration targets a Linux host. Other operating systems have not been validated as part of this documentation update.
@@ -119,7 +120,8 @@ Use those same values when running pairing or backup commands. If you change the
 Browser / PWA
     |
     v
-Fastify server -----------------> Codex app-server
+Fastify server --------+--------> Codex app-server
+    |                  +--------> OpenCode CLI
     |                                  |
     v                                  v
 SQLite + local files              Project worktrees
@@ -131,10 +133,12 @@ SQLite + local files              Project worktrees
 | Frontend | React, TypeScript, Vite |
 | API and host services | Fastify, WebSockets |
 | Application storage | SQLite and local files |
-| Agent integration | Local Codex app-server process |
+| Agent integration | Local Codex app-server and isolated OpenCode CLI sessions |
 | Task coordination | Stdio MCP server and companion skill |
 
-The browser is a client; repository access and agent execution happen on the host. Codex sessions inherit the host's configured MCP servers. See the [MCP entry point](src/mcp/index.ts) and [companion skill](skill/qahwa-tasks/SKILL.md).
+The browser is a client; repository access and agent execution happen on the host. A new task pins its selected runtime for the life of that conversation. The orchestrator can choose a different runtime only while cleaning its context. Existing and unspecified conversations remain Codex.
+
+On first OpenCode use, Qahwa atomically clones the current OpenCode config, credentials/data, session database, plugins, skills, cache, state, and temporary metadata into `<DATA_DIR>/opencode-profile`. The clone is private and independent: Qahwa never refreshes it implicitly or mutates the host profile. Codex continues to use its configured app-server profile. See the [MCP entry point](src/mcp/index.ts) and [companion skill](skill/qahwa-tasks/SKILL.md).
 
 ### Access model
 

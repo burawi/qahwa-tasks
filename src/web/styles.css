@@ -1017,6 +1017,11 @@ button.primary:hover:not(:disabled), .send-button:hover:not(:disabled), .fab:hov
 
 /* Creation form refinements from its task canvas. */
 .task-create-field { display: grid; gap: 7px; min-width: 0; }
+.runtime-choice { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; border: 0; }
+.runtime-choice legend { width: 100%; margin-bottom: 2px; font-size: 13px; font-weight: 700; }
+.runtime-choice label { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); cursor: pointer; }
+.runtime-choice label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.runtime-choice input { width: auto; margin: 0; accent-color: var(--accent); }
 .task-create-project-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .task-create-project-logo { flex: none; }
 .task-create-project-logo .project-logo.large { width: 46px; height: 46px; border-radius: 13px; }

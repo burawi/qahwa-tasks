@@ -44,7 +44,7 @@ export class TaskCreationService {
       return this.tasks.createTask(input, "user");
     }
     const { draftId } = input;
-    const requestJson = JSON.stringify([input.projectId, input.title ?? null, input.description ?? null, input.sections ?? null, input.status ?? "backlog", ids]);
+    const requestJson = JSON.stringify([input.projectId, input.title ?? null, input.description ?? null, input.sections ?? null, input.status ?? "backlog", input.agentRuntime ?? "codex", ids]);
     const task = this.database.db.transaction(() => {
       const draft = this.draft(draftId, deviceId);
       if (draft.state === "created") {

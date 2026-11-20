@@ -66,6 +66,7 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
   const [capacity, setCapacity] = useState<{ activeTurns: number; recommendedParallelism: number; availableSlots: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionDialog, setActionDialog] = useState<{ identity: string; kind: "clean" } | { identity: string; kind: "complete"; taskId: string } | { identity: string; kind: "cancel"; taskId: string; onlyIfUnstarted: boolean } | null>(null);
+  const [cleanRuntime, setCleanRuntime] = useState<"codex" | "opencode">("codex");
   const [editing, setEditing] = useState<{ kind: "task"; task: TaskDetail } | { kind: "message"; message: ChatMessage } | null>(null);
   const [cancellingMessage, setCancellingMessage] = useState<string | null>(null);
   const [runningMessageNow, setRunningMessageNow] = useState<string | null>(null);
@@ -380,7 +381,7 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
           {mode === "task" && task && <><span className="session-state-separator" aria-hidden="true">·</span><span className="session-task-status">{task.status.replaceAll("_", " ")}</span></>}
         </small>
       </div>
-      {mode === "task" && <CodexUsageIndicator />}
+      {mode === "task" && workspace?.session.runtime === "codex" && <CodexUsageIndicator />}
       {mode === "orchestrator" && capacity && <span className="capacity-pill"><i />{capacity.activeTurns} active <b>·</b> {capacity.availableSlots} available</span>}
       {mode === "orchestrator" && <button type="button" className="icon-button" disabled={busy || running || !connected} onClick={() => {
         setActionDialog({ identity: chatIdentity, kind: "clean" });
@@ -389,11 +390,12 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
     </header>
 
     {workspace && (mode === "orchestrator" || task) && <div className="session-actions">
-      <ChatModelPicker key={chatIdentity} settings={workspace.modelSettings ?? defaultChatModel(mode)} disabled={!connected}
+      <span className="session-state" data-qahwa-id="session-runtime">{workspace.session.runtime === "opencode" ? "OpenCode" : "Codex"}</span>
+      {workspace.session.runtime === "codex" && <ChatModelPicker key={chatIdentity} settings={workspace.modelSettings ?? defaultChatModel(mode)} disabled={!connected}
         onSave={async settings => {
           const { workspace: saved } = await api.saveChatModel(mode, taskId, settings);
           if (chatIdentityRef.current === chatIdentity) acceptSavedWorkspace(saved);
-        }} />
+        }} />}
       {hasDesign && <div className="session-canvas-actions" ref={setCanvasActionsContainer} />}
       {mode === "task" && task?.status === "closed" && <button type="button" className="secondary" title="Move to Backlog without starting work"
         disabled={!connected || busy || restoring || running} onClick={async () => {
@@ -491,12 +493,13 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
       confirmLabel={actionDialog.kind === "clean" ? "Clean chat" : actionDialog.kind === "complete" ? "Mark completed" : "Cancel task"}
       pendingLabel={actionDialog.kind === "clean" ? "Cleaning…" : actionDialog.kind === "complete" ? "Completing…" : "Cancelling…"}
       destructive={actionDialog.kind !== "complete"} disabled={!connected || busy || running || (actionDialog.kind !== "clean" && (!task || task.status === "closed"))}
+      runtimeChoice={actionDialog.kind === "clean" ? { value: cleanRuntime, onChange: setCleanRuntime } : undefined}
       onConfirm={async () => {
         if (!connected || busy || running || chatIdentityRef.current !== actionDialog.identity
           || (actionDialog.kind !== "clean" && (!task || task.status === "closed"))) throw new Error("This action is no longer available. Close the dialog and refresh.");
         setBusy(true);
         try {
-          if (actionDialog.kind === "clean") await api.cleanOrchestrator();
+          if (actionDialog.kind === "clean") await api.cleanOrchestrator(cleanRuntime);
           else if (actionDialog.kind === "complete") await api.transition(actionDialog.taskId, "closed", "completed");
           else await api.transition(actionDialog.taskId, "closed", "cancelled", actionDialog.onlyIfUnstarted);
           if (chatIdentityRef.current !== actionDialog.identity) return;

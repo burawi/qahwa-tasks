@@ -38,6 +38,18 @@ test("creates human-readable IDs and globally ordered tasks", () => {
   } finally { database.close(); }
 });
 
+test("new tasks pin the selected agent runtime while legacy/default tasks remain Codex", () => {
+  const { database, tasks, project } = fixture();
+  try {
+    const codex = tasks.createTask({ projectId: project.id, title: "Existing behavior" }, "user");
+    const opencode = tasks.createTask({ projectId: project.id, title: "OpenCode pilot", agentRuntime: "opencode" }, "user");
+    assert.equal(codex.agentRuntime, "codex");
+    assert.equal(opencode.agentRuntime, "opencode");
+    assert.equal(tasks.getTask(opencode.id).agentRuntime, "opencode");
+    assert.throws(() => tasks.createTask({ projectId: project.id, title: "Invalid", agentRuntime: "other" as "codex" }, "user"), /Choose Codex or OpenCode/);
+  } finally { database.close(); }
+});
+
 test("enforces the agreed workflow and explicit Codex closure", () => {
   const { database, tasks, project } = fixture();
   try {
