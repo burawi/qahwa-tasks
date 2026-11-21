@@ -30,6 +30,19 @@ test("a reconnecting request cannot lock typing in the composer", () => {
   assert.match(api, /window\.clearTimeout\(pending\.timer\)/);
 });
 
+test("accepted messages clear the draft and every saved selection context", () => {
+  const accepted = workspace.slice(workspace.indexOf("const sent = await onSend"), workspace.indexOf("const addFiles"));
+  assert.match(accepted, /window\.getSelection\(\)\?\.removeAllRanges\(\)/);
+  assert.match(accepted, /voice\.cancel\(\)/);
+  assert.match(accepted, /setMessage\(\(current\) => current === message \? "" : current\)/);
+  assert.match(accepted, /setAttachments\(\[\]\)/);
+  const send = workspace.slice(workspace.indexOf("const send = async"), workspace.indexOf("return <section"));
+  assert.match(send, /setSelectedExcerpt\(null\)/);
+  assert.match(send, /setSelectedDesignElement\(null\)/);
+  assert.match(send, /setCanvasSelectionResetKey\(current => current \+ 1\)/);
+  assert.match(send, /onClearTaskSelection\?\.\(\)/);
+});
+
 test("shared composer supports mobile multi-file selection, desktop drops, progress, and attachment-only sends", () => {
   const attachmentMenu = readFileSync(new URL("../src/web/components/AttachmentMenu.tsx", import.meta.url), "utf8");
   assert.match(workspace, /<AttachmentMenu /);

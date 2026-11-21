@@ -1080,8 +1080,10 @@ export class AgentService {
       if (session.runtime === "opencode") {
         assertDomain(!followup || threadId, "The existing conversation is unavailable; automatic retry disabled", "conversation_unavailable", 409);
         const runId = `opencode-${randomUUID()}`;
+        const owner = { ownerType, ownerId };
+        const scheduleVersion = messageFromRow(row).metadata?.scheduleVersion;
         this.updateSession(ownerType, ownerId, { activeTurnId: runId, runState: "running" });
-        const result = await this.opencode.run({
+        const started = await this.opencode.start({
           ownerKey: `${ownerType}:${ownerId}`,
           cwd,
           prompt: `${developerInstructions.replaceAll("Codex", "OpenCode")}\n\n${prompt
@@ -1092,23 +1094,59 @@ export class AgentService {
           unrestricted: ownerType === "orchestrator",
           attachments: prepared.map(attachment => attachment.path),
         });
-        assertCurrentStart();
-        this.updateSession(ownerType, ownerId, { threadId: result.sessionId, activeTurnId: runId, runState: "running" });
-        this.finishAgentMessage({ ownerType, ownerId }, result.messageId, result.text || "Done.", runId);
+        try { assertCurrentStart(); }
+        catch (error) { this.opencode.interrupt(`${ownerType}:${ownerId}`); throw error; }
+        // The runtime has accepted the prompt. Commit acceptance before returning
+        // so the composer can clear while the turn continues in the background.
+        this.updateSession(ownerType, ownerId, { threadId: started.sessionId, activeTurnId: runId, runState: "running" });
         this.database.db.transaction(() => {
-          this.updateSession(ownerType, ownerId, { threadId: result.sessionId, activeTurnId: null, runState: "idle", lastError: null });
           this.attachments.markMessageStarted(messageId);
           this.database.db.prepare("DELETE FROM pending_messages WHERE message_id = ?").run(messageId);
           this.database.db.prepare("UPDATE agent_sessions SET starting_message_id = NULL WHERE owner_type = ? AND owner_id = ?").run(ownerType, ownerId);
-          if (typeof messageFromRow(row).metadata?.scheduleVersion === "number") this.schedules.setState(ownerId, "started");
+          if (typeof scheduleVersion === "number") this.schedules.setState(ownerId, "started");
           if (followup) this.messageSchedules.setState(messageId, "delivered");
-          this.guidance.update(messageId, "delivered", "OpenCode accepted and completed the guidance.", { turnId: runId, threadId: result.sessionId });
+          this.guidance.update(messageId, "delivered", "OpenCode accepted the guidance.", { turnId: runId, threadId: started.sessionId });
           if (queueIntent && !followup) this.database.db.prepare("DELETE FROM scheduler_queue WHERE task_id=? AND requested_by=? AND created_at=?")
             .run(ownerId, queueIntent.requested_by, queueIntent.created_at);
         }).immediate();
-        this.recordEvent({ ownerType, ownerId }, "turn.completed", { threadId: result.sessionId, turnId: runId, runtime: "opencode" });
-        if (ownerType === "task") this.setPresence(ownerId, "Ready", "blue", "OpenCode completed the turn");
-        void this.resumeQueues();
+        this.recordEvent(owner, "turn.started", { threadId: started.sessionId, turnId: runId, runtime: "opencode" });
+        void started.completion.then(result => {
+          if (this.closed) return;
+          const current = this.ensureSession(ownerType, ownerId);
+          if (current.generation !== session.generation) return;
+          if (current.runState === "interrupted" || (current.activeTurnId && current.activeTurnId !== runId)) {
+            void this.resumeQueues();
+            return;
+          }
+          this.finishAgentMessage(owner, result.messageId, result.text || "Done.", runId);
+          this.database.db.transaction(() => {
+            this.updateSession(ownerType, ownerId, { threadId: result.sessionId, activeTurnId: null, runState: "idle", lastError: null });
+            this.database.db.prepare("UPDATE agent_sessions SET starting_message_id = NULL WHERE owner_type = ? AND owner_id = ?").run(ownerType, ownerId);
+            this.database.db.prepare("UPDATE pending_requests SET status='expired', resolved_at=? WHERE owner_type=? AND owner_id=? AND status='pending'")
+              .run(isoNow(), ownerType, ownerId);
+          }).immediate();
+          this.recordEvent(owner, "turn.completed", { threadId: result.sessionId, turnId: runId, runtime: "opencode" });
+          if (ownerType === "task") this.setPresence(ownerId, "Ready", "blue", "OpenCode completed the turn");
+          void this.resumeQueues();
+        }).catch(error => {
+          if (this.closed) return;
+          const current = this.ensureSession(ownerType, ownerId);
+          if (current.generation !== session.generation) return;
+          if (current.runState === "interrupted" || (current.activeTurnId && current.activeTurnId !== runId)) {
+            void this.resumeQueues();
+            return;
+          }
+          const reason = error instanceof Error ? error.message : String(error);
+          this.database.db.transaction(() => {
+            this.updateSession(ownerType, ownerId, { activeTurnId: null, runState: "failed", lastError: reason });
+            this.database.db.prepare("UPDATE agent_sessions SET starting_message_id = NULL WHERE owner_type = ? AND owner_id = ?").run(ownerType, ownerId);
+            this.database.db.prepare("UPDATE pending_requests SET status='expired', resolved_at=? WHERE owner_type=? AND owner_id=? AND status='pending'")
+              .run(isoNow(), ownerType, ownerId);
+            if (ownerType === "task") this.setPresence(ownerId, "Run failed", "red", reason);
+          }).immediate();
+          this.recordEvent(owner, "turn.failed", { threadId: started.sessionId, turnId: runId, runtime: "opencode", reason });
+          void this.resumeQueues();
+        });
         return true;
       }
       await this.codex.initialize();

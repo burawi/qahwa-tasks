@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -54,11 +54,19 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
 });
 `, { mode: 0o700 });
   writeFileSync(join(root, "opencode"), `#!${process.execPath}
+const fs = require("node:fs");
 let prompt = "";
 process.stdin.on("data", chunk => prompt += chunk);
 process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({ type: "step_start", sessionID: "ses-opencode" }) + "\\n");
-  process.stdout.write(JSON.stringify({ type: "text", sessionID: "ses-opencode", messageID: "msg-opencode", part: { text: "OpenCode ready. <!-- qahwa:{\\"message\\":\\"OpenCode ready\\",\\"tone\\":\\"blue\\",\\"surface\\":\\"chat\\",\\"review\\":false} -->" } }) + "\\n");
+  const finish = () => process.stdout.write(JSON.stringify({ type: "text", sessionID: "ses-opencode", messageID: "msg-opencode", part: { text: "OpenCode ready. <!-- qahwa:{\\"message\\":\\"OpenCode ready\\",\\"tone\\":\\"blue\\",\\"surface\\":\\"chat\\",\\"review\\":false} -->" } }) + "\\n");
+  const gate = process.env.QAHWA_TEST_OPENCODE_GATE;
+  if (!gate) return finish();
+  const timer = setInterval(() => {
+    if (!fs.existsSync(gate)) return;
+    clearInterval(timer);
+    finish();
+  }, 10);
 });
 `, { mode: 0o700 });
   const previousPath = process.env.PATH;
@@ -137,6 +145,30 @@ test("task runtime is pinned and the orchestrator changes runtime only at clean 
     assert.equal(cleaned.session.threadId, null);
     assert.equal(cleaned.session.generation, 2);
   } finally { f.close(); }
+});
+
+test("OpenCode messages return after acceptance while the turn continues", async () => {
+  const f = fixture();
+  const gate = join(f.root, "opencode-gate");
+  const previousGate = process.env.QAHWA_TEST_OPENCODE_GATE;
+  process.env.QAHWA_TEST_OPENCODE_GATE = gate;
+  try {
+    const project = f.tasks.createProject({ name: "Acceptance", prefix: "ACC", rootDirectory: f.root }, "user");
+    const task = f.tasks.createTask({ projectId: project.id, title: "OpenCode acceptance", agentRuntime: "opencode" }, "user");
+    const workspace = await f.agents.send("task", task.id, "Start the slow turn");
+    assert.equal(workspace.session.runState, "running");
+    assert.equal(workspace.session.threadId, "ses-opencode");
+    assert.equal(workspace.hasPendingMessages, false);
+    assert.equal(workspace.messages.some(message => message.role === "assistant"), false);
+    writeFileSync(gate, "go");
+    const settled = await f.settled("task", task.id);
+    assert.equal(settled.session.runState, "idle");
+    assert.equal(settled.messages.at(-1)?.body, "OpenCode ready.");
+  } finally {
+    if (previousGate === undefined) delete process.env.QAHWA_TEST_OPENCODE_GATE;
+    else process.env.QAHWA_TEST_OPENCODE_GATE = previousGate;
+    f.close();
+  }
 });
 
 test("task intake stays read-only while implementation has full execution", async () => {

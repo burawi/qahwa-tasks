@@ -77,3 +77,46 @@ process.stdin.on("end", () => {
     else process.env.PATH = oldPath;
   }
 });
+
+test("OpenCode reports acceptance before the background turn finishes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "qahwa-opencode-accept-"));
+  const dataDir = join(root, "qahwa");
+  const clone = join(dataDir, "opencode-profile");
+  mkdirSync(clone, { recursive: true });
+  writeFileSync(join(clone, "clone-manifest.json"), "{}");
+  const release = join(root, "release");
+  const executable = join(root, "opencode");
+  writeFileSync(executable, `#!${process.execPath}
+const fs = require("node:fs");
+let prompt = "";
+process.stdin.on("data", chunk => prompt += chunk);
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ type: "step_start", sessionID: "ses_slow" }) + "\\n");
+  const timer = setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(release)})) return;
+    clearInterval(timer);
+    process.stdout.write(JSON.stringify({ type: "text", sessionID: "ses_slow", messageID: "msg_slow", part: { text: "Finished later." } }) + "\\n");
+    process.exit(0);
+  }, 10);
+});
+`);
+  chmodSync(executable, 0o700);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${root}:${oldPath ?? ""}`;
+  try {
+    const runtime = new OpenCodeRuntime(dataDir);
+    const started = await runtime.start({ ownerKey: "task:slow", cwd: root, prompt: "Wait", sessionId: null, accessMode: "read-only" });
+    assert.equal(started.sessionId, "ses_slow");
+    let completed = false;
+    void started.completion.then(() => { completed = true; });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(completed, false, "Acceptance must not wait for the turn to finish");
+    writeFileSync(release, "go");
+    const result = await started.completion;
+    assert.deepEqual(result, { sessionId: "ses_slow", messageId: "msg_slow", text: "Finished later." });
+    runtime.close();
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+  }
+});

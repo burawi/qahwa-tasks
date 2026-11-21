@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import readline from "node:readline";
 import Database from "better-sqlite3";
-import { assertDomain } from "../domain/errors.js";
+import { assertDomain, DomainError } from "../domain/errors.js";
 import type { TaskAccessMode } from "../domain/types.js";
 
 export interface OpenCodeProfileRoots {
@@ -124,6 +124,12 @@ export interface OpenCodeRunResult {
   text: string;
 }
 
+export interface OpenCodeStartedRun {
+  sessionId: string;
+  messageId: string;
+  completion: Promise<OpenCodeRunResult>;
+}
+
 interface OpenCodeEvent {
   type?: string;
   sessionID?: string;
@@ -138,6 +144,16 @@ export class OpenCodeRuntime {
   constructor(private readonly dataDir: string, private readonly onEvent?: (ownerKey: string, event: OpenCodeEvent) => void) {}
 
   async run(input: OpenCodeRunInput): Promise<OpenCodeRunResult> {
+    const started = await this.start(input);
+    return started.completion;
+  }
+
+  /**
+   * Spawns OpenCode and resolves as soon as the runtime has accepted the
+   * prompt. The turn keeps running in the background through `completion`, so
+   * callers can clear the composer without waiting for the whole turn.
+   */
+  async start(input: OpenCodeRunInput): Promise<OpenCodeStartedRun> {
     assertDomain(!this.running.has(input.ownerKey), "OpenCode is already running for this conversation", "opencode_already_running", 409);
     this.clone ??= ensureOpenCodeClone(this.dataDir).catch(error => { this.clone = null; throw error; });
     const clone = await this.clone;
@@ -159,6 +175,23 @@ export class OpenCodeRuntime {
     let sessionId = input.sessionId ?? "";
     let messageId = "";
     let stderr = "";
+    let accepted = false;
+    let settled = false;
+    let resolveAccept!: (value: { sessionId: string; messageId: string }) => void;
+    let rejectAccept!: (error: unknown) => void;
+    const acceptedRun = new Promise<{ sessionId: string; messageId: string }>((resolve, reject) => {
+      resolveAccept = resolve;
+      rejectAccept = reject;
+    });
+    let resolveCompletion!: (value: OpenCodeRunResult) => void;
+    let rejectCompletion!: (error: unknown) => void;
+    const completion = new Promise<OpenCodeRunResult>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    // A caller that never observes completion (for example because acceptance
+    // itself failed) must not produce an unhandled rejection.
+    void completion.catch(() => undefined);
     const lines = readline.createInterface({ input: child.stdout });
     lines.on("line", line => {
       try {
@@ -168,17 +201,41 @@ export class OpenCodeRuntime {
         if (event.part?.id && !messageId) messageId = event.part.id;
         if (event.type === "text" && typeof event.part?.text === "string") textParts.push(event.part.text);
         this.onEvent?.(input.ownerKey, event);
+        if (!accepted && sessionId) {
+          accepted = true;
+          resolveAccept({ sessionId, messageId });
+        }
       } catch { /* ignore non-event diagnostics */ }
     });
     child.stderr.on("data", chunk => { stderr = `${stderr}${String(chunk)}`.slice(-8_000); });
+    const finish = (code: number | null, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      this.running.delete(input.ownerKey);
+      lines.close();
+      if (error) {
+        if (!accepted) rejectAccept(error);
+        rejectCompletion(error);
+        return;
+      }
+      if (!accepted) {
+        const failure = new DomainError(stderr.trim() || `OpenCode stopped with exit code ${code}`, "opencode_run_failed", 503);
+        rejectAccept(failure);
+        rejectCompletion(failure);
+        return;
+      }
+      if (code !== 0) {
+        rejectCompletion(new DomainError(stderr.trim() || `OpenCode stopped with exit code ${code}`, "opencode_run_failed", 503));
+        return;
+      }
+      assertDomain(sessionId, "OpenCode did not report a session identifier", "opencode_session_failed", 503);
+      resolveCompletion({ sessionId, messageId: messageId || `opencode-${randomUUID()}`, text: textParts.join("").trim() });
+    };
+    child.once("error", error => finish(null, error));
+    child.once("exit", code => finish(code));
     child.stdin.end(input.prompt);
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("exit", resolve);
-    }).finally(() => { this.running.delete(input.ownerKey); lines.close(); });
-    assertDomain(exitCode === 0, stderr.trim() || `OpenCode stopped with exit code ${exitCode}`, "opencode_run_failed", 503);
-    assertDomain(sessionId, "OpenCode did not report a session identifier", "opencode_session_failed", 503);
-    return { sessionId, messageId: messageId || `opencode-${randomUUID()}`, text: textParts.join("").trim() };
+    const acceptedValue = await acceptedRun;
+    return { ...acceptedValue, completion };
   }
 
   interrupt(ownerKey: string): boolean {
