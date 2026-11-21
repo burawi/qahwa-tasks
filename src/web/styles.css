@@ -586,6 +586,8 @@ button:focus-visible, a:focus-visible { outline: 1px solid var(--accent); outlin
 .session-header .session-subtitle-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: inherit; font-weight: 400; letter-spacing: 0; text-transform: none; }
 .session-header .session-state-separator { flex: none; color: var(--muted); font-size: inherit; font-weight: 400; letter-spacing: 0; }
 .session-header .session-subtitle .session-state { display: inline; flex: none; padding: 0; border-radius: 0; background: transparent; text-transform: uppercase !important; }
+.session-header .session-runtime-chip { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--muted) 35%, transparent); border-radius: 99px; color: var(--muted); font-size: inherit; font-weight: 600; letter-spacing: 0; text-transform: none; line-height: 1.5; }
+.session-header .session-runtime-chip svg { width: 9px; height: 9px; flex: none; }
 .session-header .session-interrupt { flex: none; width: 44px; height: 44px; padding: 0; }
 .session-header .session-interrupt:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 .session-state, .capacity-pill { flex: none; display: none; align-items: center; gap: 6px; padding: 7px 9px; border-radius: 99px; background: var(--surface-2); color: var(--muted) !important; font-size: 10px !important; font-weight: 750 !important; letter-spacing: 0 !important; text-transform: capitalize !important; }

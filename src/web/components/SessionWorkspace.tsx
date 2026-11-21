@@ -266,6 +266,7 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
   const running = workspace?.session.runState === "running" || workspace?.session.runState === "waiting";
   const sessionStateLabel = workspace?.session.intakeState === "pending" && workspace.session.runState !== "not_started"
     ? "Clarifying scope" : workspace?.session.runState === "not_started" ? "Not started" : workspace?.session.runState;
+  const runtime = task?.agentRuntime ?? workspace?.session.runtime ?? "codex";
   const cancelMessage = useCallback(async (messageId: string) => {
     if (!connected || busy || messageActionRef.current) return;
     messageActionRef.current = true;
@@ -377,6 +378,7 @@ export function SessionWorkspace({ mode, orchestratorName = "Orchestrator", conn
         <strong>{mode === "task" ? task?.title ?? "Loading…" : "Portfolio coordination"}</strong>
         <small className="session-subtitle">
           <span className="session-subtitle-text">{mode === "task" ? task?.projectName ?? "" : "A calm view across every task"}</span>
+          {mode === "task" && task && <><span className="session-state-separator" aria-hidden="true">·</span><span className="session-runtime-chip" data-qahwa-id="session-runtime-chip" title={`${runtime === "opencode" ? "OpenCode" : "Codex"} agent`}><Terminal aria-hidden="true" />{runtime === "opencode" ? "OpenCode" : "Codex"}</span></>}
           {workspace && <><span className="session-state-separator" aria-hidden="true">·</span><span className={`session-state run-${workspace.session.runState}`} role="status">{sessionStateLabel}</span></>}
           {mode === "task" && task && <><span className="session-state-separator" aria-hidden="true">·</span><span className="session-task-status">{task.status.replaceAll("_", " ")}</span></>}
         </small>
